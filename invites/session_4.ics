@@ -1,0 +1,15 @@
+BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//MentorMatch//Demo//EN
+METHOD:REQUEST
+BEGIN:VEVENT
+UID:samunjc@gmail.com-2025-09-09T09:00:00Z
+SUMMARY:Mentor Match Session
+DTSTART:20250909T090000Z
+DTEND:20250909T093000Z
+ORGANIZER:mailto:samunjc@gmail.com
+ATTENDEE;CN=Mentee;ROLE=REQ-PARTICIPANT;PARTSTAT=NEEDS-ACTION;RSVP=TRUE:mailto:samunjc@gmail.com
+LOCATION:Microsoft Teams
+DESCRIPTION:Mentorship session (Demo/ICS)\nJoin link will be shared by mentor (demo)
+END:VEVENT
+END:VCALENDAR

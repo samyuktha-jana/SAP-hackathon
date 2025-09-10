@@ -1,0 +1,7 @@
+transformers
+langchain
+langchain-huggingface
+pandas
+sentence-transformers 
+scikit-learn
+torch
