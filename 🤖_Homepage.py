@@ -7,6 +7,9 @@ from agents.mentor_agent import functions_agent, tools, _tool_create_session_req
 from utils import notifications_panel   # shared sidebar
 import json
 
+# --- Import onboarding chatbot ---
+from onboarding_chatbot import query_gemini
+
 st.set_page_config(
     page_title="SAP360 Hub",
     page_icon="👋",
@@ -104,6 +107,7 @@ if not st.session_state.user:
                 memory=st.session_state.memories[user_email],
                 verbose=True,
             )
+            st.rerun()
         else:
             st.error("User not found.")
 
@@ -116,7 +120,7 @@ else:
 
     if st.sidebar.button("🚪 Logout"):
         st.session_state.clear()
-        st.experimental_rerun()
+        st.rerun()
 
     # Chatbot
     st.subheader(f"Hi {st.session_state.user['name']}, how can I help you today?")
@@ -140,27 +144,56 @@ else:
         # clear mentors from old query
         st.session_state.last_mentors = None  
 
-        # --- Agent response ---
+        # --- Routing logic for onboarding vs mentor agent ---
+        onboarding_keywords = [
+            "onboarding", "employee", "office", "raise a ticket", "location", "cafeteria", "pantry",
+            "office address", "office hours", "emergency", "security", "access", "food", "lounge",
+            "meeting room", "printing", "wellness", "recreation", "transport", "parking", "helpdesk", "hr"
+        ]
+        # Prepare chat history for Gemini
+        chat_history = []
+        for message in st.session_state.all_messages[user_email]:
+            if isinstance(message, HumanMessage):
+                chat_history.append(f"You: {message.content}")
+            else:
+                chat_history.append(f"Bot: {message.content}")
+
+        # Get responses from both agents
+        onboarding_response = query_gemini(prompt, chat_history=chat_history)
         modified_prompt = f"(User email: {user_email}) {prompt}"
         result = st.session_state.user_agent.invoke({"input": modified_prompt})
-        response = result["output"]
+        mentor_response = result["output"]
 
         try:
-            mentors = eval(response)  # Expecting list[dict]
+            mentors = eval(mentor_response)
         except Exception:
             mentors = None
 
+        # Decide which response to show
+        fallback_phrases = [
+            "I am sorry", "I cannot answer", "I don't know", "not able to", "cannot help"
+        ]
+        def is_fallback(resp):
+            return any(phrase in resp.lower() for phrase in fallback_phrases)
+
+        if mentors and isinstance(mentors, list) and all("name" in m for m in mentors):
+            final_response = "Here are some mentors you can choose 👇"
+            st.session_state.last_mentors = mentors
+        elif not is_fallback(onboarding_response) and onboarding_response.strip() != "":
+            final_response = onboarding_response
+        else:
+            final_response = mentor_response
+
         with st.chat_message("assistant"):
-            if isinstance(mentors, list) and all("name" in m for m in mentors):
-                st.markdown("Here are some mentors you can choose 👇")
-                st.session_state.last_mentors = mentors
+            if mentors and isinstance(mentors, list) and all("name" in m for m in mentors):
+                st.markdown(final_response)
             else:
-                st.markdown(response)
+                st.markdown(final_response)
 
         st.session_state.all_messages[user_email].append(
-            AIMessage(response if not mentors else "Mentor options displayed.")
+            AIMessage(final_response if not mentors else "Mentor options displayed.")
         )
-        save_message(user_email, "assistant", response)
+        save_message(user_email, "assistant", final_response)
 
     # --- Render cached mentors (persist across reruns) ---
     if st.session_state.last_mentors:

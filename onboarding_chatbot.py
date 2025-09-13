@@ -18,12 +18,11 @@ model = genai.GenerativeModel("gemini-1.5-flash")
 # -----------------------------
 # 2. Load Onboarding Data
 # -----------------------------
+# Get the directory where this script is located
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-EMPLOYEE_CSV_PATH = os.getenv("EMPLOYEE_CSV_PATH") or os.path.join(os.path.dirname(__file__), "EmployeeData.csv")
-OFFICE_CSV_PATH = os.getenv("OFFICE_CSV_PATH") or os.path.join(os.path.dirname(__file__), "OfficeDetails.csv")
-
-employee_df = pd.read_csv(EMPLOYEE_CSV_PATH).fillna("")
-office_df = pd.read_csv(OFFICE_CSV_PATH, sep="\t").fillna("")
+employee_df = pd.read_csv(os.path.join(BASE_DIR, "EmployeeData.csv")).fillna("")
+office_df = pd.read_csv(os.path.join(BASE_DIR, "OfficeDetails.csv"), sep="\t").fillna("")
 employee_df.columns = employee_df.columns.str.strip()
 office_df.columns = office_df.columns.str.strip()
 
@@ -75,11 +74,14 @@ conversation_history = []
 # -----------------------------
 # 5. Helper function for Gemini
 # -----------------------------
-def query_gemini(user_input):
+def query_gemini(user_input, chat_history=None):
     """
     Sends the user input along with CSV data and conversation history to Gemini and returns AI response.
     If the user requests a ticket, create one in SQLite.
     """
+    # Use provided chat_history if available, else fallback to local conversation_history
+    history = chat_history if chat_history is not None else conversation_history
+
     # Special case: raising a ticket
     if "raise a ticket" in user_input.lower():
         try:
@@ -90,7 +92,7 @@ def query_gemini(user_input):
 
             # Find user name from conversation history if available
             user_name = "Unknown User"
-            for entry in conversation_history:
+            for entry in history:
                 if entry.startswith("You:") and "," in entry:
                     # Example: "You: Clarissa Tan, SAP BTP Development"
                     user_name = entry.split(",")[0].replace("You:", "").strip()
@@ -106,7 +108,7 @@ def query_gemini(user_input):
     office_json = office_df.to_dict(orient="records")
 
     # Include conversation history
-    history_text = "\n".join(conversation_history)
+    history_text = "\n".join(history)
 
     # Prepare prompt for Gemini with explicit memory instructions
     prompt = f"""
@@ -126,7 +128,7 @@ Instructions:
 - Remember any information the user provides during this session, such as their name, team, or position.
 - Use this information in future answers to personalize responses.
 - If the user asks about their team members, learning modules, or documents, use the remembered team/position info.
-- If the requested information is not available, use your own knowledge to answer the question and respond politely.
+- If the requested information is not available, use your own knowledge to answer the question and respond politely. 
 - Answer only the specific question the user asked.
 - If the user asks for team members, provide just the list of members.
 - If the user asks for learning modules, documents, or emails, provide only those.
