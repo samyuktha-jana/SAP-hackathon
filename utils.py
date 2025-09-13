@@ -1,6 +1,8 @@
 import sqlite3
 from pathlib import Path
 import streamlit as st
+from streamlit_autorefresh import st_autorefresh
+   
 
 DB_PATH = "mentormatch.db"
 
@@ -20,7 +22,6 @@ def add_notification(user_email: str, message: str, ics_path: str = None):
     )
     con.commit()
     con.close()
-
 
 def get_notifications(user_email: str):
     con = _conn()
@@ -59,3 +60,9 @@ def notifications_panel(user):
         if st.sidebar.button("Clear All"):
             clear_notifications(user["email"])
             st.sidebar.success("Notifications cleared!")
+            st.rerun()
+
+    # 🚪 Logout button inside utils (no auth.py needed)
+    if st.sidebar.button("🚪 Logout"):
+        st.session_state.clear()
+        

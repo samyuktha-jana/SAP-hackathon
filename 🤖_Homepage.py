@@ -4,7 +4,7 @@ from langchain.agents import AgentExecutor
 from langchain_core.messages import HumanMessage, AIMessage
 from langchain.memory import ConversationBufferMemory
 from agents.mentor_agent import functions_agent, tools, _tool_create_session_request
-from utils import notifications_panel   # shared sidebar
+from utils import notifications_panel
 import json
 
 # --- Import onboarding chatbot ---
@@ -17,7 +17,18 @@ st.set_page_config(
 
 st.title("Welcome to SAP360!")
 
+# --- Initialize session state keys (only once, at the very top) ---
+for key, default in {
+    "user": None,
+    "all_messages": {},
+    "memories": {},
+    "last_mentors": None,
+}.items():
+    if key not in st.session_state:
+        st.session_state[key] = default
+
 DB_PATH = "mentormatch.db"
+
 
 # ---------------- DB Helpers ----------------
 def _conn():
@@ -118,12 +129,24 @@ else:
     # Sidebar notifications
     notifications_panel(st.session_state.user)
 
-    if st.sidebar.button("🚪 Logout"):
-        st.session_state.clear()
-        st.rerun()
+
 
     # Chatbot
     st.subheader(f"Hi {st.session_state.user['name']}, how can I help you today?")
+
+    # --- Clear chat button (UI only) ---
+
+    if st.sidebar.button("🗑️ Clear Chat"):
+
+        user_email = st.session_state.user["email"]
+
+        st.session_state.all_messages[user_email] = []
+
+        st.session_state.memories[user_email].clear()
+
+        st.sidebar.success("Chat cleared from screen (history still saved).")
+
+        st.rerun()
 
     # Show chat history
     for message in st.session_state.all_messages.get(user_email, []):
@@ -219,8 +242,12 @@ else:
 
                     if confirm:
                         if slot:
-                            input_str = f"{user_email}|{mentor['id']}|{slot.split(' → ')[0]}|{slot.split(' → ')[1]}|{location}"
+                            input_str = (
+                                f"{user_email}|{mentor['email']}|{mentor['id']}|"
+                                f"{slot.split(' → ')[0]}|{slot.split(' → ')[1]}|{location}"
+                            )
                             resp = _tool_create_session_request(input_str)
+
                             st.success(f"Requested {mentor['name']} at {slot} via {location}\n\n{resp}")
 
                             # log assistant message
