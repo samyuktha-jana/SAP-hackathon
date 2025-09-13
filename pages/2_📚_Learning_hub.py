@@ -7,6 +7,17 @@ from rapidfuzz import fuzz, process
 import streamlit as st
 import google.generativeai as genai
 from dotenv import load_dotenv
+from streamlit.runtime.scriptrunner import rerun
+
+rerun()
+
+
+from utils import notifications_panel
+
+# Inside the page (after login check)
+if st.session_state.user:
+    notifications_panel(st.session_state.user)
+
 
 # ==============================
 # QUICK CONFIG FLAGS

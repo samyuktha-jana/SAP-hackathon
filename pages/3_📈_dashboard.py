@@ -1,4 +1,10 @@
 import streamlit as st
+from utils import notifications_panel
+
+# Inside the page (after login check)
+if st.session_state.user:
+    notifications_panel(st.session_state.user)
+
 
 
 # 🚨 Block page if no login
