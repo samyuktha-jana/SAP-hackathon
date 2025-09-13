@@ -1,0 +1,15 @@
+BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//MentorMatch//Demo//EN
+METHOD:REQUEST
+BEGIN:VEVENT
+UID:langston.galloway@company.com-2025-09-17T09:00+00:00Z
+SUMMARY:Mentor Match Session
+DTSTART:20250917T090000Z
+DTEND:20250917T093000Z
+ORGANIZER:mailto:langston.galloway@company.com
+ATTENDEE;CN=Mentee;ROLE=REQ-PARTICIPANT;PARTSTAT=NEEDS-ACTION;RSVP=TRUE:mailto:john.holland@company.com
+LOCATION:Microsoft Teams
+DESCRIPTION:Mentorship session (Demo/ICS)\nJoin link will be shared by mentor (demo)
+END:VEVENT
+END:VCALENDAR
