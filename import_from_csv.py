@@ -1,16 +1,15 @@
 import sqlite3
 import pandas as pd
-import numpy as np
-from pathlib import Path
 
-CSV_PATH = "Mentor Match/Empolyee Dataset.csv"   # check path & spaces
+
+CSV_PATH = "Mentor Match/Employee Dataset.csv"   
 DB_PATH  = "mentormatch.db"
 
 # -------- 1) Load CSV --------
 df = pd.read_csv(CSV_PATH).fillna("")
 
 # Validate expected columns (as they appear in CSV)
-required = ["ID","Name","Department","Team","Position","Age", "College", "Salary", "Skills","Experience Period (Months)"]
+required = ["ID","Name","Department","Team","Position","Age", "College", "Salary", "Skills","Experience Period (Months)","email","chat","timezone","topics","office_hours"]
 missing = [c for c in required if c not in df.columns]
 if missing:
     raise ValueError(f"Missing column(s): {missing}")
@@ -25,16 +24,14 @@ df = df.rename(columns={"Experience Period (Months)": "months_experience",
                         "Age": "age",
                         "College": "college",
                         "Salary": "salary",
-                        "ID": "ID"
+                        "ID": "ID",
+                        "email": "email",
+                        "chat": "chat",
+                        "timezone": "timezone",
+                        "topics": "topics",
+                        "office_hours": "office_hours"
                         })
 
-# Synthesize emails if you don’t have them
-def synth_email(name):
-    base = str(name).strip().lower().replace(" ", ".")
-    return f"{base}@company.com"
-
-df["email"] = df["name"].apply(synth_email)
-df["calendar_email"] = df["email"]
 
 # Ensure months_experience is integer
 df["months_experience"] = pd.to_numeric(df["months_experience"], errors="coerce").fillna(0).astype(int)
@@ -44,7 +41,7 @@ df["is_mentor"] = (df["months_experience"] > 24).astype(int)
 
 # Frame for insert
 users_df = df[[
-    "ID","name","email","position","department","team","skills","months_experience","is_mentor","calendar_email"
+    "ID","name","email","position","department","team","skills","months_experience","is_mentor","chat","timezone","topics","office_hours","college","age","salary"
 ]].copy()
 
 # -------- 2) Create DB & tables --------
@@ -63,20 +60,18 @@ CREATE TABLE IF NOT EXISTS users(
   skills TEXT,
   months_experience INTEGER DEFAULT 0,
   is_mentor INTEGER DEFAULT 0,
-  calendar_email TEXT
+  chat TEXT,
+  timezone TEXT,
+  topics TEXT,
+  office_hours TEXT,
+  college TEXT,
+  age INTEGER,
+  salary REAL
+  
 );
 """)
 
-cur.execute("""
-CREATE TABLE IF NOT EXISTS mentor_profiles(
-  mentor_id INTEGER PRIMARY KEY,
-  bio TEXT,
-  areas_of_help TEXT,
-  max_mentees INTEGER DEFAULT 5,
-  accepting_new INTEGER DEFAULT 1,
-  FOREIGN KEY (mentor_id) REFERENCES users(ID)
-);
-""")
+
 
 cur.execute("""
 CREATE TABLE IF NOT EXISTS sessions(
@@ -114,13 +109,37 @@ CREATE TABLE IF NOT EXISTS audit_logs(
 );
 """)
 
+
+
+cur.execute("""
+CREATE TABLE notifications(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_email TEXT NOT NULL,
+  message TEXT NOT NULL,
+  ics_path TEXT,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+""")
+
+cur.execute("""
+CREATE TABLE IF NOT EXISTS chat_history(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_email TEXT NOT NULL,
+  role TEXT NOT NULL,  -- 'user' or 'assistant'
+  message TEXT NOT NULL,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);""")
+
+
 # -------- 3) Upsert users --------
 # Using INSERT OR REPLACE works if ID (the PK) is provided.
 cur.executemany("""
 INSERT OR REPLACE INTO users
-(ID, name, email, position, department, team, skills, months_experience, is_mentor, calendar_email)
-VALUES (?,?,?,?,?,?,?,?,?,?)
+(ID, name, email, position, department, team, skills, months_experience, is_mentor,
+ chat, timezone, topics, office_hours, college, age, salary)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 """, users_df.itertuples(index=False, name=None))
+
 
 # -------- 4) Initialize rewards for mentors --------
 cur.execute("""
@@ -132,4 +151,4 @@ con.commit()
 con.close()
 
 print(f"Imported {len(users_df)} users into {DB_PATH}.")
-print("   sessions/rewards/audit_logs are ready (rewards initialized for mentors).")
+
