@@ -21,8 +21,8 @@ model = genai.GenerativeModel("gemini-1.5-flash")
 # Get the directory where this script is located
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-employee_df = pd.read_csv(os.path.join(BASE_DIR, "EmployeeData.csv")).fillna("")
-office_df = pd.read_csv(os.path.join(BASE_DIR, "OfficeDetails.csv"), sep="\t").fillna("")
+employee_df = pd.read_csv(os.path.join(BASE_DIR, "/Users/samyuktha/Desktop/SAP-hackathon/Employee Dataset1.csv")).fillna("")
+office_df = pd.read_csv(os.path.join(BASE_DIR, "/Users/samyuktha/Desktop/SAP-hackathon/OfficeDetails.csv"), sep="\t").fillna("")
 employee_df.columns = employee_df.columns.str.strip()
 office_df.columns = office_df.columns.str.strip()
 

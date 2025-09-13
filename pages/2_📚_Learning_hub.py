@@ -7,10 +7,6 @@ from rapidfuzz import fuzz, process
 import streamlit as st
 import google.generativeai as genai
 from dotenv import load_dotenv
-from streamlit.runtime.scriptrunner import rerun
-
-rerun()
-
 
 from utils import notifications_panel
 
@@ -22,12 +18,14 @@ if st.session_state.user:
 # ==============================
 # QUICK CONFIG FLAGS
 # ==============================
-HIDE_GAP_DISTRIBUTION_CHART = False               # Hide small bar chart in Gap Summary if True
-SHOW_DETAILED_GAP_TABLE_BY_DEFAULT = False        # Gap summary table expander open by default
-SHOW_CHECKPOINT_FILTERS = False                   # (Previously) show filters - kept for future use
-SHOW_CHECKPOINT_DETAILS = False                   # (Previously) details expander - kept for future use
-SHOW_CHECKPOINT_DATES_INLINE = False              # (Previously) show dates inline - kept for future use
-SHOW_CHECKPOINT_SECTION = False                   # <--- NEW: If False, completely hide the Checkpoints list + form
+HIDE_GAP_DISTRIBUTION_CHART = False                # Hide small bar chart in Gap Summary if True
+SHOW_DETAILED_GAP_TABLE_BY_DEFAULT = False         # Gap summary table expander open by default
+SHOW_CHECKPOINT_SECTION = False                    # If False, completely hide the old Checkpoints list UI
+SHOW_CHECKPOINT_FILTERS = False                    # (Only used if SHOW_CHECKPOINT_SECTION=True)
+SHOW_CHECKPOINT_DETAILS = False                    # (Only used if SHOW_CHECKPOINT_SECTION=True)
+SHOW_CHECKPOINT_DATES_INLINE = False               # (Only used if SHOW_CHECKPOINT_SECTION=True)
+PHASE_COMPLETION_CHECKBOXES_ENABLED = True         # Master switch for phase completion controls
+USE_PHASE_COMPLETION_FOR_OVERALL_PROGRESS = True   # If True, overall completion bar is phase-based (not checkpoint-based)
 
 # --------------------------------------------------
 # Page & Session Guards
@@ -162,6 +160,7 @@ def compute_skill_gap(df_role, user_skills_dict, fuzzy=True):
             normalized_user[matched] = lvl
         else:
             normalized_user[skill_clean] = lvl
+
     gap = {"missing": [], "underdeveloped": [], "met": [], "extra": []}
     for _, row in required_rows.iterrows():
         req_skill = row["Skill"]
@@ -170,6 +169,7 @@ def compute_skill_gap(df_role, user_skills_dict, fuzzy=True):
         desc = row.get("Description", "")
         base_courses = row.get("Recommended_Courses", "")
         user_level = normalized_user.get(req_skill, None)
+
         if user_level is None:
             gap["missing"].append({
                 "skill": req_skill, "required_level": req_level, "user_level": None,
@@ -194,6 +194,7 @@ def compute_skill_gap(df_role, user_skills_dict, fuzzy=True):
                     "skill": req_skill, "required_level": req_level, "user_level": user_level,
                     "weight": weight, "description": desc, "base_courses": base_courses
                 })
+
     required_set = set(canonical_skills)
     for uskill in normalized_user.keys():
         if uskill not in required_set:
@@ -258,14 +259,17 @@ def build_llm_prompt(role, gap, stats, course_suggestions):
             else:
                 lines.append(f"- {it['skill']} (Need Level {it.get('required_level')} | Weight {it.get('weight')})")
         return "\n".join(lines) if lines else "None"
+
     missing_text = fmt_skill_list(gap["missing"])
     under_text = fmt_skill_list(gap["underdeveloped"], show_gap=True)
     met_text = fmt_skill_list(gap["met"], show_gap=True)
+
     course_text = []
     for skill, courses in course_suggestions.items():
         if courses:
             course_text.append(f"{skill}: {', '.join(courses)}")
     course_block = "\n".join(course_text) if course_text else "No baseline course suggestions found."
+
     return f"""
 You are a professional upskilling advisor.
 
@@ -292,10 +296,10 @@ Baseline Course Suggestions (raw):
 
 TASK:
 1. Produce a prioritized learning roadmap (Phase 1 quick wins, Phase 2 core, Phase 3 advanced).
-2. For each skill: rationale (1 sentence), 1-2 courses, mini practice project.
-3. Timeline (weeks) each phase (assume 5-6 hrs/week).
-4. Interdependencies.
-5. 3 measurable progress metrics.
+2. For each skill in phases: rationale (1 sentence), 1–2 courses, mini practice project.
+3. Suggest timeline (weeks) per phase assuming 5–6 hrs/week.
+4. Highlight interdependencies.
+5. Provide 3 measurable progress metrics.
 """
 
 def call_gemini(prompt):
@@ -334,6 +338,7 @@ def init_progress_state():
             "weekly_hours": 5,
             "phase_weeks": {},
             "checkpoints": [],
+            "phase_status": {},     # NEW: store phase completion status
             "created_at": datetime.utcnow().isoformat(),
         }
 
@@ -343,6 +348,7 @@ def build_default_checkpoints(phase_weeks: dict, start_date: date):
     for phase_no in sorted(phase_weeks.keys()):
         weeks = phase_weeks[phase_no]
         label = f"Phase {phase_no}"
+        # Start
         checkpoints.append({
             "id": f"phase{phase_no}_start",
             "label": f"{label} Start",
@@ -351,6 +357,7 @@ def build_default_checkpoints(phase_weeks: dict, start_date: date):
             "completed": False,
             "completed_at": None
         })
+        # Mid (only if >2 weeks)
         if weeks > 2:
             mid_date = current_start + timedelta(weeks=weeks/2)
             checkpoints.append({
@@ -361,6 +368,7 @@ def build_default_checkpoints(phase_weeks: dict, start_date: date):
                 "completed": False,
                 "completed_at": None
             })
+        # End
         end_date = current_start + timedelta(weeks=weeks)
         checkpoints.append({
             "id": f"phase{phase_no}_end",
@@ -402,10 +410,16 @@ def toggle_checkpoint(cp_id, new_value: bool):
 
 def mark_phase_complete(phase_no: int):
     pt = st.session_state["progress_tracker"]
+    # Mark all checkpoints for the phase
     for c in pt["checkpoints"]:
         if c.get("phase") == phase_no:
             c["completed"] = True
             c["completed_at"] = datetime.utcnow().isoformat()
+    # Mark phase status
+    ensure_phase_status()
+    if phase_no in pt["phase_status"]:
+        pt["phase_status"][phase_no]["completed"] = True
+        pt["phase_status"][phase_no]["completed_at"] = datetime.utcnow().isoformat()
 
 def compute_progress_metrics():
     pt = st.session_state["progress_tracker"]
@@ -453,6 +467,85 @@ def status_badge(cp):
         except:
             pass
     return "⏳"
+
+# ------------- Phase Status / Completion Helpers -------------
+def ensure_phase_status():
+    pt = st.session_state["progress_tracker"]
+    if "phase_status" not in pt:
+        pt["phase_status"] = {}
+    for p in pt["phase_weeks"].keys():
+        pt["phase_status"].setdefault(p, {"completed": False, "completed_at": None})
+    # prune removed phases
+    for p in list(pt["phase_status"].keys()):
+        if p not in pt["phase_weeks"]:
+            del pt["phase_status"][p]
+
+def sync_checkpoints_with_phase(phase_no: int, complete: bool):
+    pt = st.session_state["progress_tracker"]
+    for c in pt.get("checkpoints", []):
+        if c.get("phase") == phase_no:
+            c["completed"] = complete
+            c["completed_at"] = datetime.utcnow().isoformat() if complete else None
+
+def compute_phase_completion_pct():
+    pt = st.session_state["progress_tracker"]
+    ensure_phase_status()
+    ps = pt["phase_status"]
+    if not ps:
+        return 0.0
+    total = len(ps)
+    done = sum(1 for v in ps.values() if v["completed"])
+    return done / total * 100
+
+def compute_weighted_phase_completion():
+    pt = st.session_state["progress_tracker"]
+    ensure_phase_status()
+    if not pt["phase_weeks"]:
+        return 0.0
+    total_weight = sum(pt["phase_weeks"].values()) or 1
+    acc = 0
+    for ph, weeks in pt["phase_weeks"].items():
+        if pt["phase_status"].get(ph, {}).get("completed"):
+            acc += weeks
+    return acc / total_weight * 100
+
+def render_phase_completion_controls():
+    pt = st.session_state["progress_tracker"]
+    ensure_phase_status()
+    if not pt["phase_weeks"]:
+        st.info("Define phase durations (parse or set) to enable phase completion toggles.")
+        return
+    st.markdown("### Phase Completion")
+    cols = st.columns(min(len(pt["phase_weeks"]), 4) or 1)
+    changed = False
+    for idx, phase_no in enumerate(sorted(pt["phase_weeks"].keys())):
+        with cols[idx % len(cols)]:
+            info = pt["phase_status"][phase_no]
+            label = f"Phase {phase_no} ({pt['phase_weeks'][phase_no]} wk)"
+            new_val = st.checkbox(label, value=info["completed"], key=f"phase_complete_{phase_no}")
+            if new_val != info["completed"]:
+                info["completed"] = new_val
+                info["completed_at"] = datetime.utcnow().isoformat() if new_val else None
+                sync_checkpoints_with_phase(phase_no, new_val)
+                changed = True
+    bcol1, bcol2 = st.columns(2)
+    with bcol1:
+        if st.button("Mark All Phases Complete"):
+            for p, info in pt["phase_status"].items():
+                if not info["completed"]:
+                    info["completed"] = True
+                    info["completed_at"] = datetime.utcnow().isoformat()
+                    sync_checkpoints_with_phase(p, True)
+            changed = True
+    with bcol2:
+        if st.button("Reset All Phases"):
+            for p, info in pt["phase_status"].items():
+                info["completed"] = False
+                info["completed_at"] = None
+                sync_checkpoints_with_phase(p, False)
+            changed = True
+    if changed:
+        st.rerun()
 
 # --------------------------------------------------
 # Gap Summary Renderer
@@ -532,7 +625,9 @@ with tabs[0]:
     if df is None or "Role" not in df.columns:
         st.error("Failed to load role skill data.")
         st.stop()
+
     roles = sorted(df["Role"].dropna().unique().tolist())
+
     with st.form("analysis_form", clear_on_submit=False):
         col_left, col_right = st.columns([1, 1])
         with col_left:
@@ -543,12 +638,14 @@ with tabs[0]:
                 df[df["Role"] == selected_role][["Skill", "Required_Level", "Skill_Category", "Weight"]],
                 use_container_width=True
             )
+
         user_skill_input = st.text_area(
             "Your Current Skills",
             height=110,
-            help="Separate by commas. Use Skill:Level (e.g. Python:3, SQL:2)."
+            help="Separate by commas. Use Skill:Level for proficiency (e.g. Python:3, SQL:2)."
         )
         submitted = st.form_submit_button("Analyze Skill Gap & Generate Plan")
+
     if submitted:
         user_skills_dict = parse_user_skills(user_skill_input)
         role_df = df[df["Role"] == selected_role]
@@ -562,8 +659,10 @@ with tabs[0]:
             st.session_state["latest_stats"] = stats
             st.session_state["latest_course_suggestions"] = course_suggestions
             st.session_state["latest_role"] = selected_role
+
             st.subheader("Gap Summary")
             render_gap_summary(stats)
+
             gap_tabs = st.tabs(["Missing", "Underdeveloped", "Met", "Extra"])
             with gap_tabs[0]:
                 st.write(pd.DataFrame(gap["missing"]) if gap["missing"] else "No missing skills.")
@@ -573,12 +672,14 @@ with tabs[0]:
                 st.write(pd.DataFrame(gap["met"]) if gap["met"] else "None met yet.")
             with gap_tabs[3]:
                 st.write(pd.DataFrame(gap["extra"]) if gap["extra"] else "No extra skills.")
+
             st.subheader("Course Suggestions")
             if course_suggestions:
                 for skill, courses in course_suggestions.items():
                     st.markdown(f"**{skill}:** {', '.join(courses)}")
             else:
                 st.write("None available.")
+
             st.divider()
             st.subheader("Gemini Learning Plan")
             with st.spinner("Generating plan..."):
@@ -589,6 +690,7 @@ with tabs[0]:
             st.markdown(llm_output)
             with st.expander("Prompt Debug"):
                 st.code(prompt, language="markdown")
+
     if st.session_state.get("latest_plan"):
         st.divider()
         c1, c2, c3 = st.columns([1, 1, 2])
@@ -605,7 +707,7 @@ with tabs[0]:
                         new_plan = call_gemini(new_prompt)
                     st.session_state["latest_prompt"] = new_prompt
                     st.session_state["latest_plan"] = new_plan
-                    st.experimental_rerun()
+                    st.rerun()
                 else:
                     st.warning("Missing context to regenerate.")
         with c2:
@@ -616,10 +718,10 @@ with tabs[0]:
                 st.success("Plan accepted. Track it in the Progress Tracker tab.")
         with c3:
             if st.button("Clear Generated Plan"):
-                for key in ["latest_gap","latest_stats","latest_course_suggestions","latest_role","latest_prompt","latest_plan"]:
+                for key in ["latest_gap", "latest_stats", "latest_course_suggestions", "latest_role", "latest_prompt", "latest_plan"]:
                     st.session_state.pop(key, None)
                 st.info("Cleared.")
-                st.experimental_rerun()
+                st.rerun()
 
 # --------------------------------------------------
 # TAB 2: Chosen Plan
@@ -640,27 +742,56 @@ with tabs[1]:
 # --------------------------------------------------
 with tabs[2]:
     st.header("📈 Progress Tracker")
+
     init_progress_state()
     pt = st.session_state["progress_tracker"]
+
     if not st.session_state.get("chosen_upskillingplan"):
         st.info("Accept a learning plan first in the 'Upskill Analysis & Plan' tab.")
         st.stop()
 
-    # Metrics (still useful even if checkpoints hidden)
+    # Ensure phase status alignment early
+    ensure_phase_status()
+
+    # If phases exist and checkpoints are empty but user had them historically, we don't auto rebuild
+    # (Respect earlier decision to hide them). If you want auto-generation when hidden, uncomment below:
+    # if pt["start_date"] and pt["phase_weeks"] and not pt["checkpoints"]:
+    #     rebuild_checkpoints()
+
+    # Metrics
     metrics = compute_progress_metrics()
     total_weeks = sum(pt["phase_weeks"].values()) if pt["phase_weeks"] else 0
     elapsed_weeks = weeks_elapsed_since(pt["start_date"]) if pt["start_date"] else 0
     time_progress_pct = (elapsed_weeks / total_weeks * 100) if total_weeks else 0
 
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Overall Completion", f"{metrics['overall_pct']:.1f}%")
-    m2.metric("Time Progress", f"{time_progress_pct:.1f}%")
-    m3.metric("Weeks Elapsed", f"{elapsed_weeks}")
-    m4.metric("Total Planned Weeks", f"{total_weeks}")
-    st.progress(min(int(metrics["overall_pct"]), 100))
+    # Phase-based completion metrics
+    phase_pct_val_simple = compute_phase_completion_pct()
+    phase_pct_val_weighted = compute_weighted_phase_completion()
 
-    if metrics["phase_pct"]:
-        with st.expander("Phase Progress", expanded=False):
+    # Decide which to treat as "overall"
+    if USE_PHASE_COMPLETION_FOR_OVERALL_PROGRESS:
+        overall_label = "Phase Completion"
+        overall_pct = phase_pct_val_weighted  # weighted view
+    else:
+        overall_label = "Checkpoint Completion"
+        overall_pct = metrics["overall_pct"]
+
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric(overall_label, f"{overall_pct:.1f}%")
+    m2.metric("Simple Phase %", f"{phase_pct_val_simple:.1f}%")
+    m3.metric("Time Progress", f"{time_progress_pct:.1f}%")
+    m4.metric("Weeks Elapsed", f"{elapsed_weeks}")
+    m5.metric("Planned Weeks", f"{total_weeks}")
+
+    st.progress(min(int(overall_pct), 100))
+
+    # Phase Completion Controls
+    if PHASE_COMPLETION_CHECKBOXES_ENABLED:
+        render_phase_completion_controls()
+
+    # (Optional) Phase progress via checkpoints (kept for diagnostics if you enable them again)
+    if metrics["phase_pct"] and SHOW_CHECKPOINT_SECTION:
+        with st.expander("Phase Progress (Checkpoint-Based)", expanded=False):
             phase_bar_cols = st.columns(len(metrics["phase_pct"]))
             for i, (p, pct) in enumerate(sorted(metrics["phase_pct"].items())):
                 with phase_bar_cols[i]:
@@ -668,18 +799,19 @@ with tabs[2]:
                     st.progress(min(int(pct), 100))
                     if st.button(f"Mark Phase {p} Complete", key=f"markphase_{p}"):
                         mark_phase_complete(p)
-                        st.experimental_rerun()
+                        st.rerun()
 
-    # Checkpoints Section (Hidden if SHOW_CHECKPOINT_SECTION = False)
+    # HIDDEN / OPTIONAL CHECKPOINT LIST
     if SHOW_CHECKPOINT_SECTION:
         st.markdown("### Checkpoints")
-        # optional filters / list rendering (kept minimal)
         if not pt["checkpoints"] and pt["phase_weeks"] and pt["start_date"]:
             if st.button("Generate Default Checkpoints"):
                 rebuild_checkpoints(force=True)
-                st.experimental_rerun()
+                st.rerun()
         elif pt["checkpoints"]:
-            for c in pt["checkpoints"]:
+            # Minimal rendering; advanced filters removed if flag false
+            filtered = pt["checkpoints"]
+            for c in filtered:
                 label_parts = [status_badge(c), c['label']]
                 if SHOW_CHECKPOINT_DATES_INLINE and c.get("target_date"):
                     label_parts.append(f"({c['target_date']})")
@@ -692,8 +824,11 @@ with tabs[2]:
                 if SHOW_CHECKPOINT_DETAILS:
                     st.caption(f"Target: {c.get('target_date') or '—'} | Done: {c.get('completed_at') or '—'}")
 
-    # Add checkpoint form only if section visible
-    if SHOW_CHECKPOINT_SECTION:
+        if st.button("Rebuild Default Checkpoints (Overwrite)"):
+            rebuild_checkpoints(force=True)
+            st.success("Default checkpoints rebuilt.")
+            st.rerun()
+
         with st.expander("Add Custom Checkpoint", expanded=False):
             with st.form("add_cp_form"):
                 col_acp = st.columns([2, 1, 1, 1])
@@ -710,8 +845,9 @@ with tabs[2]:
                 if submit_cp and cp_label.strip():
                     add_custom_checkpoint(cp_label.strip(), cp_date, phase_no=phase_val)
                     st.success("Checkpoint added.")
-                    st.experimental_rerun()
+                    st.rerun()
 
+    # Export / Backup
     st.markdown("### Export / Backup")
     exp_json = export_progress_json()
     st.download_button("Download Progress JSON", data=exp_json,
@@ -719,19 +855,25 @@ with tabs[2]:
 
     with st.expander("Advanced / Debug State"):
         st.code(exp_json, language="json")
-        col_dbg1, col_dbg2 = st.columns(2)
-        with col_dbg1:
-            if st.button("Clear All Checkpoints (Keep phases)"):
-                pt["checkpoints"] = []
-                st.warning("Checkpoints cleared.")
-                st.experimental_rerun()
-        with col_dbg2:
+        cols_dbg = st.columns(3)
+        with cols_dbg[0]:
             if st.button("Full Reset Progress Tracker"):
                 st.session_state.pop("progress_tracker", None)
                 st.success("Progress tracker reset.")
-                st.experimental_rerun()
+                st.rerun()
+        if SHOW_CHECKPOINT_SECTION:
+            with cols_dbg[1]:
+                if st.button("Clear All Checkpoints"):
+                    pt["checkpoints"] = []
+                    st.warning("Checkpoints cleared.")
+                    st.rerun()
+            with cols_dbg[2]:
+                if st.button("Rebuild Checkpoints (Force)"):
+                    rebuild_checkpoints(force=True)
+                    st.success("Rebuilt.")
+                    st.rerun()
 
-    # Setup & Phase Management (collapsed)
+    # Setup (Phases / Start Date / Hours)
     with st.expander("Setup (Start Date, Hours, Parse Phases)", expanded=False):
         setup_cols = st.columns([1, 1, 1])
         with setup_cols[0]:
@@ -750,18 +892,20 @@ with tabs[2]:
                 parsed = parse_phase_durations(st.session_state["chosen_upskillingplan"])
                 if parsed:
                     pt["phase_weeks"] = parsed
-                    st.success(f"Parsed: {parsed}")
+                    ensure_phase_status()
+                    st.success(f"Parsed phases: {parsed}")
                 else:
                     st.warning("Could not detect numeric phase durations in plan.")
-        if pt["start_date"] and pt["phase_weeks"] and not pt["checkpoints"] and SHOW_CHECKPOINT_SECTION:
+        if pt["start_date"] and pt["phase_weeks"] and SHOW_CHECKPOINT_SECTION and not pt["checkpoints"]:
             if st.button("Generate Default Checkpoints"):
                 rebuild_checkpoints(force=True)
                 st.success("Default checkpoints created.")
-                st.experimental_rerun()
+                st.rerun()
 
+    # Manage Phase Durations
     with st.expander("Manage Phase Durations", expanded=False):
         if not pt["phase_weeks"]:
-            st.info("No phase durations defined yet. Use Auto-Parse above.")
+            st.info("No phase durations defined yet. Use Auto-Parse above or manually set below.")
         else:
             editable_phases = {}
             phase_cols = st.columns(min(len(pt["phase_weeks"]), 4) or 1)
@@ -776,9 +920,11 @@ with tabs[2]:
                     editable_phases[phase_no] = weeks_val
             if st.button("Apply Phase Changes"):
                 pt["phase_weeks"] = editable_phases
+                ensure_phase_status()
                 st.success("Phase durations updated.")
+
         if pt["phase_weeks"] and SHOW_CHECKPOINT_SECTION:
             if st.button("Rebuild Default Checkpoints (Overwrite)"):
                 rebuild_checkpoints(force=True)
                 st.success("Default checkpoints rebuilt.")
-                st.experimental_rerun()
+                st.rerun()

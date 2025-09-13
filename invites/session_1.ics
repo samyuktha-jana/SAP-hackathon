@@ -8,7 +8,7 @@ SUMMARY:Mentor Match Session
 DTSTART:20250918T090000Z
 DTEND:20250918T093000Z
 ORGANIZER:mailto:brook.lopez@company.com
-ATTENDEE;CN=Mentee;ROLE=REQ-PARTICIPANT;PARTSTAT=NEEDS-ACTION;RSVP=TRUE:mailto:samunjc@gmail.com
+ATTENDEE;CN=Mentee;ROLE=REQ-PARTICIPANT;PARTSTAT=NEEDS-ACTION;RSVP=TRUE:mailto:jae.crowder@company.com
 LOCATION:Microsoft Teams
 DESCRIPTION:Mentorship session (Demo/ICS)\nJoin link will be shared by mentor (demo)
 END:VEVENT
