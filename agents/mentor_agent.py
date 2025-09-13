@@ -3,10 +3,23 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 import numpy as np
 from dotenv import load_dotenv
+from langchain.agents import create_openai_functions_agent, AgentExecutor
+from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain.memory import ConversationBufferMemory
 
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from langchain.agents import initialize_agent, AgentType
 from langchain.tools import tool
+
+import pickle
+import asyncio
+from utils import add_notification  
+
+try:
+    asyncio.get_running_loop()
+except RuntimeError:
+    asyncio.set_event_loop(asyncio.new_event_loop())
+
 
 # ----------------------------
 # Load env + config
@@ -38,7 +51,6 @@ def _dicts(rows): return [dict(r) for r in rows]
 def ensure_tables():
     con = _conn()
     cur = con.cursor()
-    # sessions (mentee requests & approvals)
     cur.execute("""
     CREATE TABLE IF NOT EXISTS sessions(
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -57,13 +69,16 @@ def ensure_tables():
 
 ensure_tables()
 
+
+
+
 # ----------------------------
 # Search (SQL + semantic fallback)
 # ----------------------------
 def fetch_all_mentors(min_months=24):
     con = _conn()
     rows = con.execute("""
-        SELECT ID, name, position, department, team, skills, months_experience, calendar_email, email
+        SELECT ID, name, position, department, team, skills, months_experience,email
         FROM users
         WHERE is_mentor=1 AND months_experience >= ?
     """, (min_months,)).fetchall()
@@ -76,10 +91,9 @@ def cosine(a, b):
     return float(np.dot(a, b) / (na * nb))
 
 def search_mentors(query: str, min_months: int = 24, limit: int = 3):
-    # 1) SQL LIKE
     con = _conn()
     rows = con.execute(f"""
-        SELECT ID, name, position, department, team, skills, months_experience, calendar_email, email
+        SELECT ID, name, position, department, team, skills, months_experience, email
         FROM users
         WHERE is_mentor=1
           AND months_experience >= ?
@@ -91,7 +105,6 @@ def search_mentors(query: str, min_months: int = 24, limit: int = 3):
     if len(rows) >= limit:
         return rows
 
-    # 2) semantic fallback
     mentors = fetch_all_mentors(min_months)
     if not mentors: return []
     q_vec = np.array(emb.embed_query(query))
@@ -102,14 +115,12 @@ def search_mentors(query: str, min_months: int = 24, limit: int = 3):
     return [mentors[i] | {"score": round(scores[i], 3)} for i in top_idx]
 
 # ----------------------------
-# Availability (demo slots)
+# Availability (Isaiah real, rest fake)
 # ----------------------------
 def fake_week_slots(mentor_email, slots_per_mentor=3, minutes=30):
-    """
-    Deterministic-looking 30-min slots over the next week.
-    No external API; perfect for hackathon demos.
-    """
-    base = datetime.now(timezone.utc).replace(hour=9, minute=0, second=0, microsecond=0)
+    base = (datetime.now(timezone.utc) + timedelta(days=1)).replace(
+        hour=9, minute=0, second=0, microsecond=0
+    )
     seed = sum(ord(c) for c in (mentor_email or "")) % 5
     slots = []
     for i in range(slots_per_mentor):
@@ -121,10 +132,14 @@ def fake_week_slots(mentor_email, slots_per_mentor=3, minutes=30):
 def attach_availability(mentors: list, slots_per_mentor: int = 3):
     enriched = []
     for m in mentors:
-        email = (m.get("calendar_email") or m.get("email") or "").lower()
-        slots = fake_week_slots(email, slots_per_mentor=slots_per_mentor)  # demo for all
-        enriched.append({**m, "availability": slots[:slots_per_mentor]})
+        email = (m.get("email") or "").lower()
+        slots = fake_week_slots(email, slots_per_mentor=slots_per_mentor)
+        enriched.append({
+            **m,
+            "availability": slots[:slots_per_mentor]
+        })
     return enriched
+
 
 # ----------------------------
 # Session request + approval (ICS invite)
@@ -141,12 +156,12 @@ def create_session_request_row(mentee_email, mentor_id, start_utc, end_utc, loca
     con.close()
     return sid
 
-def _ics_dt(iso):
-    # "2025-09-12T09:00:00Z" -> "20250912T090000Z"
-    dt = iso.rstrip("Z")
-    if len(dt) == 19:  # no trailing Z in input
-        dt = dt + "Z"
-    return dt.replace("-", "").replace(":", "")
+def _ics_dt(iso: str) -> str:
+    # Normalize "2025-09-12T09:00:00+00:00Z" → "2025-09-12T09:00:00Z"
+    clean = iso.replace("+00:00", "").replace("Z", "")
+    dt = datetime.fromisoformat(clean).replace(tzinfo=timezone.utc)
+    return dt.strftime("%Y%m%dT%H%M%SZ")
+
 
 def make_ics(subject, start_iso, end_iso, organizer_email, attendee_email, location="Microsoft Teams", description="Mentor Match session"):
     uid = f"{organizer_email}-{start_iso}"
@@ -168,10 +183,6 @@ END:VCALENDAR
 """
 
 def approve_and_create_ics(session_id: int, mentor_email: str):
-    """
-    Mentor 'approves' → generate .ics file (universal calendar invite) and mark as booked.
-    Keeps your demo independent of external APIs.
-    """
     con = _conn()
     s = con.execute("SELECT * FROM sessions WHERE id=?", (session_id,)).fetchone()
     if not s:
@@ -196,37 +207,53 @@ def approve_and_create_ics(session_id: int, mentor_email: str):
     con.commit(); con.close()
     return {"ics_path": ics_path, "status": "booked"}
 
-def meetings_in(email: str, days: int):
-    day = (datetime.now(timezone.utc) + timedelta(days=days)).date().isoformat()
+def meetings_in(email: str, days: int | None = None):
+    """
+    If days is provided, return sessions on that relative day.
+    If days is None, return all upcoming (future) sessions.
+    """
     con = _conn()
-    rows = con.execute("""
-        SELECT s.id, s.mentee_email, s.mentor_id, s.status, s.start_utc, s.end_utc, u.name as mentor_name
-        FROM sessions s JOIN users u ON u.ID = s.mentor_id
-        WHERE s.mentee_email=? AND date(s.start_utc)=date(?)
-        ORDER BY s.start_utc DESC
-    """, (email, day)).fetchall()
+    if days is None:
+        rows = con.execute("""
+            SELECT s.id, s.mentee_email, s.mentor_id, s.status,
+                   s.start_utc, s.end_utc, u.name as mentor_name
+            FROM sessions s
+            JOIN users u ON u.ID = s.mentor_id
+            WHERE s.mentee_email=? AND datetime(s.start_utc) >= datetime('now')
+            ORDER BY s.start_utc ASC
+        """, (email,)).fetchall()
+    else:
+        day = (datetime.now(timezone.utc) + timedelta(days=days)).date().isoformat()
+        rows = con.execute("""
+            SELECT s.id, s.mentee_email, s.mentor_id, s.status,
+                   s.start_utc, s.end_utc, u.name as mentor_name
+            FROM sessions s
+            JOIN users u ON u.ID = s.mentor_id
+            WHERE s.mentee_email=? AND date(s.start_utc)=date(?)
+            ORDER BY s.start_utc ASC
+        """, (email, day)).fetchall()
     con.close()
     return _dicts(rows)
 
+
 # ----------------------------
-# Tools (for the agent to call)
+# Tools
 # ----------------------------
 @tool("search_with_availability", return_direct=True)
 def _tool_search_with_availability(input: str) -> str:
     """
-    Find up to 3 mentors by role/skill/team and attach up to 3 free slots each (demo).
-    Input: keyword or role (e.g., "python", "lead data analyst").
+    Find up to 3 mentors by role/skill/team and attach up to 3 free slots each.
+    Isaiah shows real calendar availability, others show fake slots.
     """
     results = search_mentors(input, limit=3)
     enriched = attach_availability(results, slots_per_mentor=3)
-    # return lightweight JSON-ish string for the agent to summarize nicely
     return str([
         {
             "id": m["ID"], "name": m["name"],
             "position": m["position"], "department": m["department"],
             "team": m["team"], "skills": m["skills"],
             "months_experience": m["months_experience"],
-            "email": (m.get("calendar_email") or m.get("email")),
+            "email": m.get("email"),
             "availability": m.get("availability", [])
         } for m in enriched
     ])
@@ -234,8 +261,8 @@ def _tool_search_with_availability(input: str) -> str:
 @tool("create_session_request", return_direct=True)
 def _tool_create_session_request(input: str) -> str:
     """
-    Mentee requests a session.
-    Input: "mentee_email|mentor_id|start_utc|end_utc|location"
+    Mentee requests a session with a mentor.
+    Input format: "mentee_email|mentor_id|start_utc|end_utc|location"
     Example: "me@corp.com|96412|2025-09-12T09:00:00Z|2025-09-12T09:30:00Z|Teams"
     """
     try:
@@ -245,17 +272,34 @@ def _tool_create_session_request(input: str) -> str:
     except Exception as e:
         return f'{{"ok": false, "error": "{str(e)}"}}'
 
+
+
 @tool("approve_session", return_direct=True)
 def _tool_approve_session(input: str) -> str:
     """
-    Mentor approves the request → generates ICS invite and marks booked.
-    Input: "session_id|mentor_email"
+    Mentor approves a request, generates an ICS calendar invite,
+    updates the DB, and notifies the mentee.
+    Input format: "session_id|mentor_email"
     """
     try:
         session_id, mentor_email = [p.strip() for p in input.split("|")]
         res = approve_and_create_ics(int(session_id), mentor_email)
         if "error" in res:
             return f'{{"ok": false, "error": "{res["error"]}"}}'
+
+        # fetch mentee email for notification
+        con = _conn()
+        row = con.execute("SELECT mentee_email FROM sessions WHERE id=?", (session_id,)).fetchone()
+        con.close()
+
+        if row:
+            mentee_email = row["mentee_email"]
+            add_notification(
+                mentee_email,
+                f"🎉 Your session has been approved by {mentor_email}!",
+                ics_path=res["ics_path"]
+            )
+
         return f'{{"ok": true, "status": "booked", "ics_path": "{res["ics_path"]}"}}'
     except Exception as e:
         return f'{{"ok": false, "error": "{str(e)}"}}'
@@ -263,29 +307,25 @@ def _tool_approve_session(input: str) -> str:
 @tool("meetings_in", return_direct=True)
 def _tool_meetings_in(input: str) -> str:
     """
-    Sessions on a relative day. Input: "mentee_email|days"  (e.g., "me@corp.com|-3")
+    Get a mentee's sessions.
+
+    Input formats:
+      "<CURRENT_USER_EMAIL>|0"   → meetings today
+      "<CURRENT_USER_EMAIL>|-3"  → meetings 3 days ago
+      "<CURRENT_USER_EMAIL>"     → all upcoming meetings
     """
     try:
-        email, days_str = [p.strip() for p in input.split("|")]
-        res = meetings_in(email, int(days_str))
+        parts = [p.strip() for p in input.split("|")]
+        if len(parts) == 1:   # only email → all future bookings
+            email = parts[0]
+            res = meetings_in(email, None)
+        else:
+            email, days_str = parts
+            res = meetings_in(email, int(days_str))
         return str(res)
     except Exception as e:
         return f"Error: {e}"
 
-# ----------------------------
-# Agent
-# ----------------------------
-system_message = """
-You are MentorMatch Agent.
-
-When asked for mentors, call `search_with_availability` (3 mentors + up to 3 demo slots each).
-When the user picks a mentor and slot, call `create_session_request` with mentee_email, mentor_id, start_utc, end_utc, location.
-Only mentors can approve; call `approve_session` to finalize (creates ICS invite and marks as booked).
-For "who did I meet / who will I meet in X days", call `meetings_in`.
-
-Use only the provided tools. Do NOT invent data. Recommend only mentors with is_mentor=1 and months_experience ≥ 24.
-Be concise and summarize tool results clearly.
-"""
 
 tools = [
     _tool_search_with_availability,
@@ -294,13 +334,62 @@ tools = [
     _tool_meetings_in,
 ]
 
-agent = initialize_agent(
-    tools, llm,
-    agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
-    verbose=True,
-    handle_parsing_errors=True,
-    agent_kwargs={"prefix": system_message},
+
+# ----------------------------
+# Agent (Functions-based)
+# ----------------------------
+system_message = """
+You are MentorMatch Agent.
+
+🔑 RULES:
+
+- If the user asks about mentors, skills, teams, or availability → always call `search_with_availability`.
+- If the user asks to book a session → call `create_session_request`.
+- If the user asks to approve → call `approve_session`.
+- If the user asks about bookings, meetings, or sessions (past, present, or future) → always call `meetings_in`.
+
+⚠️ You already know the logged-in user's email. Always include it in the tool call.
+Format: `meetings_in("<CURRENT_USER_EMAIL>|<days_offset>")`
+
+✅ Date mapping:
+- "today" → days=0
+- "tomorrow" → days=1
+- "yesterday" → days=-1
+- "upcoming" → days >= 0
+- Specific date → convert to offset from today.
+
+Examples:
+- "what are my bookings" → `meetings_in("<CURRENT_USER_EMAIL>|0")`
+- "sessions tomorrow" → `meetings_in("<CURRENT_USER_EMAIL>|1")`
+- "past meetings" → `meetings_in("<CURRENT_USER_EMAIL>|-3")`
+- "bookings on 2025-09-15" → compute offset and call `meetings_in`.
+
+❌ Never answer bookings/meetings questions with mentors.
+❌ Never refuse a mentor query.
+For non-mentorship questions, answer conversationally.
+"""
+
+
+
+
+memory = ConversationBufferMemory(
+    memory_key="chat_history",   # must match MessagesPlaceholder
+    return_messages=True         # so it returns list of messages
 )
+prompt = ChatPromptTemplate.from_messages([
+    ("system", system_message),
+    MessagesPlaceholder(variable_name="chat_history"),
+    ("human", "{input}"),
+    MessagesPlaceholder(variable_name="agent_scratchpad"),
+])
+
+functions_agent = create_openai_functions_agent(
+    llm=llm,
+    tools=tools,
+    prompt=prompt,
+)
+
+agent = AgentExecutor(agent=functions_agent, tools=tools, memory=memory,verbose=True)
 
 # ----------------------------
 # Demo loop

@@ -1,0 +1,28 @@
+#nithya agent
+rapidfuzz
+google-generativeai
+
+#samyuktha agent 
+Core
+
+grpcio
+grpcio-status
+
+python-dotenv
+numpy
+
+langchain
+langchain-core
+langchain-google-genai
+langchain-community duckduckgo-search
+--upgrade langchain-google-genai google-generativeai langchain-core
+
+google-generativeai
+google-auth
+google-auth-oauthlib
+google-auth-httplib2
+google-api-python-client
+
+streamlit
+streamlit_autorefresh
+-U ddgs
