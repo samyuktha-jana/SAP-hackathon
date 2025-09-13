@@ -6,6 +6,7 @@ from langchain.memory import ConversationBufferMemory
 from agents.mentor_agent import functions_agent, tools, _tool_create_session_request
 from utils import notifications_panel
 import json
+from datetime import datetime
 
 # --- Import onboarding chatbot ---
 from onboarding_chatbot import query_gemini
@@ -28,7 +29,6 @@ for key, default in {
         st.session_state[key] = default
 
 DB_PATH = "mentormatch.db"
-
 
 # ---------------- DB Helpers ----------------
 def _conn():
@@ -73,6 +73,20 @@ def load_chat_history(user_email):
     ).fetchall()
     con.close()
     return [(r["role"], r["message"]) for r in rows]
+
+# --- NEW: fetch bookings as a mentee ---
+def get_bookings_as_mentee(user_email):
+    con = _conn()
+    rows = con.execute("""
+        SELECT s.id, s.start_utc, s.end_utc, s.status, s.location,
+               u.name as mentor_name, u.email as mentor_email
+        FROM sessions s
+        JOIN users u ON u.id = s.mentor_id
+        WHERE s.mentee_email=?
+        ORDER BY s.start_utc DESC
+    """, (user_email,)).fetchall()
+    con.close()
+    return [dict(r) for r in rows]
 
 # ---------------- Session State ----------------
 if "user" not in st.session_state:
@@ -129,23 +143,15 @@ else:
     # Sidebar notifications
     notifications_panel(st.session_state.user)
 
-
-
     # Chatbot
     st.subheader(f"Hi {st.session_state.user['name']}, how can I help you today?")
 
     # --- Clear chat button (UI only) ---
-
     if st.sidebar.button("🗑️ Clear Chat"):
-
         user_email = st.session_state.user["email"]
-
         st.session_state.all_messages[user_email] = []
-
         st.session_state.memories[user_email].clear()
-
         st.sidebar.success("Chat cleared from screen (history still saved).")
-
         st.rerun()
 
     # Show chat history
@@ -167,56 +173,67 @@ else:
         # clear mentors from old query
         st.session_state.last_mentors = None  
 
-        # --- Routing logic for onboarding vs mentor agent ---
-        onboarding_keywords = [
-            "onboarding", "employee", "office", "raise a ticket", "location", "cafeteria", "pantry",
-            "office address", "office hours", "emergency", "security", "access", "food", "lounge",
-            "meeting room", "printing", "wellness", "recreation", "transport", "parking", "helpdesk", "hr"
-        ]
-        # Prepare chat history for Gemini
-        chat_history = []
-        for message in st.session_state.all_messages[user_email]:
-            if isinstance(message, HumanMessage):
-                chat_history.append(f"You: {message.content}")
+        # --- Special case: show mentee bookings ---
+        if "my bookings" in prompt.lower() or "past bookings" in prompt.lower():
+            bookings = get_bookings_as_mentee(user_email)
+            if not bookings:
+                final_response = "📭 You have no bookings yet."
             else:
-                chat_history.append(f"Bot: {message.content}")
+                lines = ["📅 Here are your bookings:"]
+                for b in bookings:
+                    lines.append(
+                        f"- With **{b['mentor_name']}** ({b['mentor_email']}) "
+                        f"on {b['start_utc']} → {b['end_utc']} "
+                        f"at {b['location']} (Status: {b['status']})"
+                    )
+                final_response = "\n".join(lines)
 
-        # Get responses from both agents
-        onboarding_response = query_gemini(prompt, chat_history=chat_history)
-        modified_prompt = f"(User email: {user_email}) {prompt}"
-        result = st.session_state.user_agent.invoke({"input": modified_prompt})
-        mentor_response = result["output"]
+            with st.chat_message("assistant"):
+                st.markdown(final_response)
 
-        try:
-            mentors = eval(mentor_response)
-        except Exception:
-            mentors = None
+            st.session_state.all_messages[user_email].append(AIMessage(final_response))
+            save_message(user_email, "assistant", final_response)
 
-        # Decide which response to show
-        fallback_phrases = [
-            "I am sorry", "I cannot answer", "I don't know", "not able to", "cannot help"
-        ]
-        def is_fallback(resp):
-            return any(phrase in resp.lower() for phrase in fallback_phrases)
-
-        if mentors and isinstance(mentors, list) and all("name" in m for m in mentors):
-            final_response = "Here are some mentors you can choose 👇"
-            st.session_state.last_mentors = mentors
-        elif not is_fallback(onboarding_response) and onboarding_response.strip() != "":
-            final_response = onboarding_response
         else:
-            final_response = mentor_response
+            # --- Routing logic for onboarding vs mentor agent ---
+            chat_history = []
+            for message in st.session_state.all_messages[user_email]:
+                if isinstance(message, HumanMessage):
+                    chat_history.append(f"You: {message.content}")
+                else:
+                    chat_history.append(f"Bot: {message.content}")
 
-        with st.chat_message("assistant"):
+            onboarding_response = query_gemini(prompt, chat_history=chat_history)
+            modified_prompt = f"(User email: {user_email}) {prompt}"
+            result = st.session_state.user_agent.invoke({"input": modified_prompt})
+            mentor_response = result["output"]
+
+            try:
+                mentors = eval(mentor_response)
+            except Exception:
+                mentors = None
+
+            fallback_phrases = [
+                "I am sorry", "I cannot answer", "I don't know", "not able to", "cannot help"
+            ]
+            def is_fallback(resp):
+                return any(phrase in resp.lower() for phrase in fallback_phrases)
+
             if mentors and isinstance(mentors, list) and all("name" in m for m in mentors):
-                st.markdown(final_response)
+                final_response = "Here are some mentors you can choose 👇"
+                st.session_state.last_mentors = mentors
+            elif not is_fallback(onboarding_response) and onboarding_response.strip() != "":
+                final_response = onboarding_response
             else:
+                final_response = mentor_response
+
+            with st.chat_message("assistant"):
                 st.markdown(final_response)
 
-        st.session_state.all_messages[user_email].append(
-            AIMessage(final_response if not mentors else "Mentor options displayed.")
-        )
-        save_message(user_email, "assistant", final_response)
+            st.session_state.all_messages[user_email].append(
+                AIMessage(final_response if not mentors else "Mentor options displayed.")
+            )
+            save_message(user_email, "assistant", final_response)
 
     # --- Render cached mentors (persist across reruns) ---
     if st.session_state.last_mentors:
@@ -257,8 +274,8 @@ else:
                             save_message(user_email, "assistant",
                                          f"Booking request sent to {mentor['name']} for {slot} ({location}).")
 
-                            # clear mentors + rerun
                             st.session_state.last_mentors = None
                             st.rerun()
                         else:
                             st.warning("Please select a slot first.")
+
