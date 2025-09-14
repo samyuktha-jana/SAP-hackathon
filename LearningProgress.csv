@@ -10,28 +10,28 @@ jonas.jerebko@company.com,Agile Delivery Basics,False
 clarissa.tan@company.com,SAP BTP Overview,True
 clarissa.tan@company.com,SAP Business Application Studio Basics,True
 clarissa.tan@company.com,SAP BTP CLI Training,True
-clarissa.tan@company.com,Java for SAP Developers,False
-clarissa.tan@company.com,Node.js Fundamentals,False
-clarissa.tan@company.com,Git & Version Control,False
-clarissa.tan@company.com,SAP Cloud SDK,False
-clarissa.tan@company.com,Postman & API Testing,False
-clarissa.tan@company.com,Cloud Integration Basics,False
-clarissa.tan@company.com,Agile & Scrum Fundamentals,False
+clarissa.tan@company.com,Java for SAP Developers,True
+clarissa.tan@company.com,Node.js Fundamentals,True
+clarissa.tan@company.com,Git & Version Control,True
+clarissa.tan@company.com,SAP Cloud SDK,True
+clarissa.tan@company.com,Postman & API Testing,True
+clarissa.tan@company.com,Cloud Integration Basics,True
+clarissa.tan@company.com,Agile & Scrum Fundamentals,True
 langston.galloway@company.com,SAP Industry Cloud Engineering,False
 langston.galloway@company.com,SAP Cloud SDK Advanced,False
 langston.galloway@company.com,ABAP Advanced,False
 langston.galloway@company.com,Cloud Deployment,False
 langston.galloway@company.com,Agile Cloud Delivery,False
-jae.crowder@company.com,SAP BTP Advanced Development,False
-jae.crowder@company.com,Java & JavaScript for SAP,False
-jae.crowder@company.com,SAP BTP CLI Deep Dive,False
-jae.crowder@company.com,Node.js for Integration,False
-jae.crowder@company.com,Git & GitHub Workflows,False
-jae.crowder@company.com,SAP Cloud SDK,False
-jae.crowder@company.com,API & Microservices,False
-jae.crowder@company.com,Postman Advanced Usage,False
-jae.crowder@company.com,Cloud Integration Advanced,False
-jae.crowder@company.com,Agile Project Practices,False
+jae.crowder@company.com,SAP BTP Advanced Development,True
+jae.crowder@company.com,Java & JavaScript for SAP,True
+jae.crowder@company.com,SAP BTP CLI Deep Dive,True
+jae.crowder@company.com,Node.js for Integration,True
+jae.crowder@company.com,Git & GitHub Workflows,True
+jae.crowder@company.com,SAP Cloud SDK,True
+jae.crowder@company.com,API & Microservices,True
+jae.crowder@company.com,Postman Advanced Usage,True
+jae.crowder@company.com,Cloud Integration Advanced,True
+jae.crowder@company.com,Agile Project Practices,True
 robert.covington@company.com,SAP Strategy Leadership,True
 robert.covington@company.com,Business Analysis Advanced,False
 robert.covington@company.com,Project Management Advanced,False

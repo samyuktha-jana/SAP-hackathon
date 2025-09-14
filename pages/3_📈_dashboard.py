@@ -437,27 +437,27 @@ with tab5:
     car_x = 30 + (career_score / 100) * 400
 
     road_html = f"""
-<div style="text-align:center; margin-top:20px;">
-  <svg width="100%" height="120" viewBox="0 0 1000 120" preserveAspectRatio="none">
-    <!-- road -->
-    <rect x="0" y="60" width="1000" height="30" fill="#555"/>
-    <line x1="0" y1="75" x2="1000" y2="75" stroke="yellow" stroke-width="3" stroke-dasharray="15,15"/>
-    
-    <!-- car body -->
-    <rect x="{car_x}" y="15" width="70" height="40" rx="5" ry="5" fill="red"/>
+        <div style="text-align:center; margin-top:20px;">
+        <svg width="100%" height="120" viewBox="0 0 500 120">
+            <!-- road -->
+            <rect x="20" y="60" width="460" height="30" fill="#555"/>
+            <line x1="30" y1="75" x2="470" y2="75" stroke="yellow" stroke-width="3" stroke-dasharray="15,15"/>
+            
+            <!-- car body -->
+            <rect x="{car_x}" y="15" width="70" height="40" rx="5" ry="5" fill="red"/>
 
-    <!-- car windows -->
-    <rect x="{car_x + 8}" y="20" width="22" height="18"
-          fill="lightblue" stroke="black" stroke-width="1" rx="3" ry="3"/>
-    <rect x="{car_x + 40}" y="20" width="22" height="18"
-          fill="lightblue" stroke="black" stroke-width="1" rx="3" ry="3"/>
-    
-    <!-- wheels -->
-    <circle cx="{car_x + 15}" cy="60" r="10" fill="black"/>
-    <circle cx="{car_x + 55}" cy="60" r="10" fill="black"/>
-  </svg>
-</div>
-"""
+            <!-- car windows -->
+            <rect x="{car_x + 8}" y="20" width="22" height="18"
+                fill="lightblue" stroke="black" stroke-width="1" rx="3" ry="3"/>
+            <rect x="{car_x + 40}" y="20" width="22" height="18"
+                fill="lightblue" stroke="black" stroke-width="1" rx="3" ry="3"/>
+            
+            <!-- wheels -->
+            <circle cx="{car_x + 15}" cy="60" r="10" fill="black"/>
+            <circle cx="{car_x + 55}" cy="60" r="10" fill="black"/>
+        </svg>
+        </div>
+        """
 
     components.html(road_html, height=160)
 
@@ -466,9 +466,11 @@ with tab5:
     # -------------------------
     if career_score < 25:
         stage = "🚦 Just starting — Keep moving!"
-    elif career_score < 50:
+    elif 25 <= career_score < 50:
+        stage = "🏍️ Gaining speed — You're on your way!"
+    elif 50>career_score< 75:
         stage = "🏎️ Halfway there — Making progress!"
-    elif career_score < 75:
+    elif 75>career_score < 99:
         stage = "🚗 Almost there — Stay consistent!"
     else:
         stage = "🏁 Almost at the finish line!"
