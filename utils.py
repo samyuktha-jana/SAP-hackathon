@@ -66,9 +66,12 @@ def notifications_panel(user):
             st.sidebar.success("Notifications cleared!")
             st.rerun()
 
-    # 🚪 Logout button inside utils (no auth.py needed)
     if st.sidebar.button("🚪 Logout"):
         st.session_state.clear()
+        st.session_state["user"] = None   # re-initialize so it exists
+        st.success("You have been logged out.")
+        st.rerun()
+
         
 
 
