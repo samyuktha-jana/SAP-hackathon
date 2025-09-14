@@ -30,7 +30,7 @@ USE_PHASE_COMPLETION_FOR_OVERALL_PROGRESS = True   # If True, overall completion
 # --------------------------------------------------
 # Page & Session Guards
 # --------------------------------------------------
-st.set_page_config(page_title="Role Skill Gap Chatbot", layout="wide")
+#st.set_page_config(page_title="Role Skill Gap Chatbot", layout="wide")
 
 if "user" not in st.session_state or not st.session_state.user:
     st.warning("⚠️ Please login from the Homepage first.")

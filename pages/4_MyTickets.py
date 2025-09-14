@@ -15,7 +15,7 @@ if st.session_state.user:
 
 
 # ---------- Page ----------
-st.set_page_config(page_title="Company Ticket Hub", page_icon="🎫", layout="wide")
+#st.set_page_config(page_title="Company Ticket Hub", page_icon="🎫", layout="wide")
 st.title("Company Ticket Hub")
 st.caption("CSV-backed ticketing with safe writes, chatbot prefill, and role-based views.")
 
