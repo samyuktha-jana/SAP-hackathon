@@ -6,7 +6,7 @@ from langchain.memory import ConversationBufferMemory
 from agents.mentor_agent import functions_agent, tools, _tool_create_session_request
 from utils import notifications_panel
 import json
-from datetime import datetime
+from datetime import datetime,timezone
 import re
 import pandas as pd
 import os
@@ -35,11 +35,14 @@ for key, default in {
 DB_PATH = "mentormatch.db"
 
 # ---------------------- Ticket intent detect --------------------
+
+TICKETS_CSV = os.getenv("TICKETS_CSV", "tickets.csv")
+TICKET_ROLE_COL = "role"
 TICKET_KEYWORDS = [
     "ticket", "ticket id", "helpdesk", "service desk",
     "hr help", "hr ticket", "it ticket", "my ticket",
-    "mytickets", "support ticket"
-]
+    "mytickets", "support ticket", "raise a ticket", "create ticket"]
+
 
 def detect_ticket_intent(text: str) -> bool:
     if not text:
@@ -159,6 +162,160 @@ def open_mytickets_page(focus_id: int | None = None, from_chat: bool = True):
         st.markdown("➡️ [Open MyTickets](pages/4_MyTickets.py)")
         st.stop()
 
+# ------------------------- CSV helpers (NEW) --------------------
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+def _ensure_tickets_csv():
+    if not os.path.exists(TICKETS_CSV):
+        pd.DataFrame(columns=[
+            "id","title","description","status","priority","category_key",
+            "requester_email","assignee_email","created_at","updated_at", TICKET_ROLE_COL
+        ]).to_csv(TICKETS_CSV, index=False)
+
+def _load_tickets_csv() -> pd.DataFrame:
+    _ensure_tickets_csv()
+    try:
+        df = pd.read_csv(TICKETS_CSV)
+    except Exception:
+        df = pd.DataFrame(columns=[
+            "id","title","description","status","priority","category_key",
+            "requester_email","assignee_email","created_at","updated_at", TICKET_ROLE_COL
+        ])
+    if "id" in df.columns:
+        df["id"] = pd.to_numeric(df["id"], errors="coerce").fillna(0).astype(int)
+    if TICKET_ROLE_COL not in df.columns:
+        df[TICKET_ROLE_COL] = ""
+    return df
+
+def _save_tickets_csv(df: pd.DataFrame):
+    tmp = TICKETS_CSV + ".tmp"
+    df.to_csv(tmp, index=False)
+    os.replace(tmp, TICKETS_CSV)
+
+def _next_ticket_id(df: pd.DataFrame) -> int:
+    return (int(df["id"].max()) + 1) if (not df.empty and "id" in df.columns) else 1
+
+def create_ticket_via_chat(*, requester_email: str, title: str, description: str,
+                           category_key: str, priority: str, assignee_email: str | None,
+                           requester_role: str | None) -> int:
+    df = _load_tickets_csv()
+    new_id = _next_ticket_id(df)
+    row = {
+        "id": new_id,
+        "title": title.strip(),
+        "description": description.strip(),
+        "status": "NEW",
+        "priority": priority.strip().upper(),
+        "category_key": category_key.strip().lower(),
+        "requester_email": requester_email,
+        "assignee_email": (assignee_email or "").strip(),
+        "created_at": _now_iso(),
+        "updated_at": _now_iso(),
+        TICKET_ROLE_COL: (requester_role or "EMPLOYEE").upper()
+    }
+    df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+    _save_tickets_csv(df)
+    return new_id
+
+# ------------------------- Intake flow (NEW) --------------------
+def start_ticket_intake():
+    st.session_state.ticket_intake_active = True
+    st.session_state.ticket_stage = "category"
+    st.session_state.ticket_data = {
+        "category_key": None,
+        "priority": None,
+        "title": None,
+        "description": None,
+        "assignee_email": None,
+    }
+    with st.chat_message("assistant"):
+        st.markdown(
+            "Got it — let's create a ticket.\n\n"
+            "1) **Which category does this issue fall under?** (e.g., **IT**, **HR**, **Operations**)"
+        )
+
+def handle_ticket_intake_input(user_text: str, requester_email: str, requester_role: str):
+    data = st.session_state.ticket_data
+    stage = st.session_state.ticket_stage
+    text = (user_text or "").strip()
+
+    def ask(msg: str):
+        with st.chat_message("assistant"):
+            st.markdown(msg)
+
+    # Allow cancel at any time
+    if text.lower() in {"cancel", "stop", "quit"}:
+        st.session_state.ticket_intake_active = False
+        st.session_state.ticket_stage = None
+        st.session_state.ticket_data = {}
+        ask("Okay, cancelled the ticket creation.")
+        return
+
+    if stage == "category":
+       data["category_key"] = text.strip().lower() if text else "it"
+       st.session_state.ticket_stage = "priority"
+       ask(
+        "2) **What priority should we use?**\n\n"
+        "- **P1 (Critical):** Major outage/security issue; blocks many people.\n"
+        "- **P2 (High):** Severely impacts your work; no reasonable workaround.\n"
+        "- **P3 (Normal):** Affects productivity; workaround exists. *(default)*\n"
+        "- **P4 (Low):** Minor issue or general request/enhancement.\n\n"
+        "Type `P1`, `P2`, `P3`, or `P4` (press Enter to accept **P3**)."
+       )
+       return
+
+
+    if stage == "priority":
+        p = text.upper().replace(" ", "")
+        if p not in {"P1","P2","P3","P4",""}:
+            ask("Please enter one of `P1`, `P2`, `P3`, `P4` (or leave blank for `P3`).")
+            return
+        data["priority"] = p if p else "P3"
+        st.session_state.ticket_stage = "title"
+        ask("3) **Title**? (short summary)")
+        return
+
+    if stage == "title":
+        if len(text) < 3:
+            ask("Title looks too short — give me a brief summary (≥ 3 chars).")
+            return
+        data["title"] = text
+        st.session_state.ticket_stage = "description"
+        ask("4) **Description**? (steps to reproduce, expected vs actual, errors)")
+        return
+
+    if stage == "description":
+        if len(text) < 5:
+            ask("Please add a bit more detail (≥ 5 chars).")
+            return
+        data["description"] = text
+        st.session_state.ticket_stage = "assignee"
+        ask("5) **Assignee email** (optional) — or type `skip`.")
+        return
+
+    if stage == "assignee":
+        data["assignee_email"] = "" if text.lower() in {"", "skip", "none"} else text
+        # Create ticket now
+        tid = create_ticket_via_chat(
+            requester_email=requester_email,
+            title=data["title"],
+            description=data["description"],
+            category_key=data["category_key"],
+            priority=data["priority"],
+            assignee_email=data["assignee_email"],
+            requester_role=requester_role,
+        )
+        st.session_state.ticket_intake_active = False
+        st.session_state.ticket_stage = None
+        st.session_state.ticket_data = {}
+
+        with st.chat_message("assistant"):
+            st.markdown(f"✅ Ticket **#{tid}** created. Opening **MyTickets** so you can review/edit.")
+        # Jump to the MyTickets page focused on this ticket
+        open_mytickets_page(focus_id=tid, from_chat=True)
+        st.stop()
+
 # --- NEW: fetch bookings as a mentee ---
 def get_bookings_as_mentee(user_email):
     con = _conn()
@@ -182,6 +339,12 @@ if "memories" not in st.session_state:
     st.session_state.memories = {}
 if "last_mentors" not in st.session_state:
     st.session_state.last_mentors = None
+if "ticket_intake_active" not in st.session_state:
+    st.session_state.ticket_intake_active = False
+if "ticket_stage" not in st.session_state:
+    st.session_state.ticket_stage = None
+if "ticket_data" not in st.session_state:
+    st.session_state.ticket_data = {}
 
 # ---------------- Login ----------------
 if not st.session_state.user:

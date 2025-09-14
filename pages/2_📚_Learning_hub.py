@@ -3,17 +3,38 @@ import re
 import json
 import pandas as pd
 from datetime import datetime, date, timedelta
+
 from rapidfuzz import fuzz, process
 import streamlit as st
 import google.generativeai as genai
 from dotenv import load_dotenv
 
 from utils import notifications_panel
+from utils import hydrate_session_from_json, persist_session_to_json
 
-# Inside the page (after login check)
-if st.session_state.user:
+# after login check
+hydrate_session_from_json()
+
+
+# ==================================================
+# AUTH / NOTIFICATIONS (top so failures stop early)
+# ==================================================
+if "user" in st.session_state and st.session_state.user:
     notifications_panel(st.session_state.user)
 
+# --------------------------------------------------
+# Page Guard
+# --------------------------------------------------
+# st.set_page_config(page_title="Role Skill Gap Chatbot", layout="wide")
+
+if "user" not in st.session_state or not st.session_state.user:
+    st.warning("⚠️ Please login from the Homepage first.")
+    st.stop()
+
+# --------------------------------------------------
+# Title
+# --------------------------------------------------
+st.title("Learning Hub")
 
 # ==============================
 # QUICK CONFIG FLAGS
@@ -25,21 +46,7 @@ SHOW_CHECKPOINT_FILTERS = False                    # (Only used if SHOW_CHECKPOI
 SHOW_CHECKPOINT_DETAILS = False                    # (Only used if SHOW_CHECKPOINT_SECTION=True)
 SHOW_CHECKPOINT_DATES_INLINE = False               # (Only used if SHOW_CHECKPOINT_SECTION=True)
 PHASE_COMPLETION_CHECKBOXES_ENABLED = True         # Master switch for phase completion controls
-USE_PHASE_COMPLETION_FOR_OVERALL_PROGRESS = True   # If True, overall completion bar is phase-based (not checkpoint-based)
-
-# --------------------------------------------------
-# Page & Session Guards
-# --------------------------------------------------
-#st.set_page_config(page_title="Role Skill Gap Chatbot", layout="wide")
-
-if "user" not in st.session_state or not st.session_state.user:
-    st.warning("⚠️ Please login from the Homepage first.")
-    st.stop()
-
-# --------------------------------------------------
-# Title
-# --------------------------------------------------
-st.title("Learning Hub")
+USE_PHASE_COMPLETION_FOR_OVERALL_PROGRESS = True   # If True, overall completion bar is phase-based
 
 # --------------------------------------------------
 # Environment & LLM Config
@@ -48,7 +55,10 @@ load_dotenv()
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
 MODEL_NAME = "gemini-1.5-flash"
 if GOOGLE_API_KEY:
-    genai.configure(api_key=GOOGLE_API_KEY)
+    try:
+        genai.configure(api_key=GOOGLE_API_KEY)
+    except Exception as _e:
+        st.warning("Could not configure Gemini API (check key).")
 
 # --------------------------------------------------
 # Data Loading / Sample Data
@@ -118,7 +128,7 @@ def load_role_skill_data():
     return df
 
 # --------------------------------------------------
-# Utility Functions (Gap & Plan)
+# Utility: Parsing & Matching
 # --------------------------------------------------
 def parse_user_skills(raw_text):
     if not raw_text:
@@ -134,7 +144,7 @@ def parse_user_skills(raw_text):
             skill_name = skill_name.strip()
             try:
                 lvl_val = float(lvl.strip())
-            except:
+            except Exception:
                 lvl_val = None
             skill_map[skill_name] = lvl_val
         else:
@@ -313,6 +323,75 @@ def call_gemini(prompt):
         return f"Error calling Gemini: {e}"
 
 # --------------------------------------------------
+# Gap Summary Renderer
+# --------------------------------------------------
+def render_gap_summary(stats: dict, show_toggle: bool = True):
+    if not stats:
+        st.info("No stats available.")
+        return
+    total = stats["total_required_skills"] or 1
+
+    def pct(v):
+        return round(v / total * 100, 1) if total else 0
+
+    gap_index = stats["weighted_gap_index"]
+    readiness = round((1 - gap_index) * 100, 1)
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Met", f"{stats['met']} ({pct(stats['met'])}%)")
+    c2.metric("Underdeveloped", f"{stats['underdeveloped']} ({pct(stats['underdeveloped'])}%)")
+    c3.metric("Missing", f"{stats['missing']} ({pct(stats['missing'])}%)")
+    c4.metric("Extra", stats['extra'])
+    c5.metric("Gap Index", gap_index)
+
+    st.progress(min(int(readiness), 100),
+                text=f"Readiness Score: {readiness}% (Higher is better)")
+
+    if not HIDE_GAP_DISTRIBUTION_CHART:
+        try:
+            import altair as alt
+            dist_df = pd.DataFrame([
+                {"Metric": "Met", "Share": pct(stats["met"])},
+                {"Metric": "Underdeveloped", "Share": pct(stats["underdeveloped"])},
+                {"Metric": "Missing", "Share": pct(stats["missing"])},
+            ])
+            chart = (
+                alt.Chart(dist_df)
+                .mark_bar()
+                .encode(
+                    x=alt.X("Share", title="Share (%)", scale=alt.Scale(domain=[0, 100])),
+                    y=alt.Y("Metric", sort=None),
+                    color=alt.Color(
+                        "Metric",
+                        legend=None,
+                        scale=alt.Scale(
+                            domain=["Met", "Underdeveloped", "Missing"],
+                            range=["#2e7d32", "#f9a825", "#c62828"]
+                        )
+                    ),
+                    tooltip=["Metric", "Share"]
+                )
+                .properties(height=120)
+            )
+            st.altair_chart(chart, use_container_width=True)
+        except Exception:
+            pass
+
+    if show_toggle:
+        with st.expander("Show detailed breakdown table", expanded=SHOW_DETAILED_GAP_TABLE_BY_DEFAULT):
+            readiness_score = readiness
+            rows = [
+                ("Total Required Skills", stats["total_required_skills"], 100.0),
+                ("Met", stats["met"], pct(stats["met"])),
+                ("Underdeveloped", stats["underdeveloped"], pct(stats["underdeveloped"])),
+                ("Missing", stats["missing"], pct(stats["missing"])),
+                ("Extra (Not Required)", stats["extra"], None),
+                ("Weighted Gap Index (0 best, 1 worst)", gap_index, None),
+                ("Readiness Score %", readiness_score, None),
+            ]
+            st.table(pd.DataFrame(rows, columns=["Metric", "Value", "Share (%)"]))
+
+# --------------------------------------------------
 # Progress Tracker Helpers
 # --------------------------------------------------
 PHASE_PATTERN = re.compile(r"(Phase\s+(\d+))[^0-9]*(\b(\d+)\s*weeks?\b)", re.IGNORECASE)
@@ -327,7 +406,7 @@ def parse_phase_durations(plan_markdown: str):
             weeks = int(match.group(4))
             if weeks > 0:
                 results[phase_no] = weeks
-        except:
+        except Exception:
             continue
     return results
 
@@ -338,7 +417,7 @@ def init_progress_state():
             "weekly_hours": 5,
             "phase_weeks": {},
             "checkpoints": [],
-            "phase_status": {},     # NEW: store phase completion status
+            "phase_status": {},
             "created_at": datetime.utcnow().isoformat(),
         }
 
@@ -348,7 +427,6 @@ def build_default_checkpoints(phase_weeks: dict, start_date: date):
     for phase_no in sorted(phase_weeks.keys()):
         weeks = phase_weeks[phase_no]
         label = f"Phase {phase_no}"
-        # Start
         checkpoints.append({
             "id": f"phase{phase_no}_start",
             "label": f"{label} Start",
@@ -357,9 +435,8 @@ def build_default_checkpoints(phase_weeks: dict, start_date: date):
             "completed": False,
             "completed_at": None
         })
-        # Mid (only if >2 weeks)
         if weeks > 2:
-            mid_date = current_start + timedelta(weeks=weeks/2)
+            mid_date = current_start + timedelta(weeks=weeks / 2)
             checkpoints.append({
                 "id": f"phase{phase_no}_mid",
                 "label": f"{label} Midpoint",
@@ -368,7 +445,6 @@ def build_default_checkpoints(phase_weeks: dict, start_date: date):
                 "completed": False,
                 "completed_at": None
             })
-        # End
         end_date = current_start + timedelta(weeks=weeks)
         checkpoints.append({
             "id": f"phase{phase_no}_end",
@@ -410,12 +486,10 @@ def toggle_checkpoint(cp_id, new_value: bool):
 
 def mark_phase_complete(phase_no: int):
     pt = st.session_state["progress_tracker"]
-    # Mark all checkpoints for the phase
     for c in pt["checkpoints"]:
         if c.get("phase") == phase_no:
             c["completed"] = True
             c["completed_at"] = datetime.utcnow().isoformat()
-    # Mark phase status
     ensure_phase_status()
     if phase_no in pt["phase_status"]:
         pt["phase_status"][phase_no]["completed"] = True
@@ -464,18 +538,16 @@ def status_badge(cp):
             tdate = datetime.fromisoformat(cp["target_date"]).date()
             if date.today() > tdate:
                 return "⚠️"
-        except:
+        except Exception:
             pass
     return "⏳"
 
-# ------------- Phase Status / Completion Helpers -------------
 def ensure_phase_status():
     pt = st.session_state["progress_tracker"]
     if "phase_status" not in pt:
         pt["phase_status"] = {}
     for p in pt["phase_weeks"].keys():
         pt["phase_status"].setdefault(p, {"completed": False, "completed_at": None})
-    # prune removed phases
     for p in list(pt["phase_status"].keys()):
         if p not in pt["phase_weeks"]:
             del pt["phase_status"][p]
@@ -548,79 +620,22 @@ def render_phase_completion_controls():
         st.rerun()
 
 # --------------------------------------------------
-# Gap Summary Renderer
-# --------------------------------------------------
-def render_gap_summary(stats: dict, show_toggle: bool = True):
-    if not stats:
-        st.info("No stats available.")
-        return
-    total = stats["total_required_skills"] or 1
-    def pct(v): return round(v / total * 100, 1) if total else 0
-    gap_index = stats["weighted_gap_index"]
-    readiness = round((1 - gap_index) * 100, 1)
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Met", f"{stats['met']} ({pct(stats['met'])}%)")
-    c2.metric("Underdeveloped", f"{stats['underdeveloped']} ({pct(stats['underdeveloped'])}%)")
-    c3.metric("Missing", f"{stats['missing']} ({pct(stats['missing'])}%)")
-    c4.metric("Extra", stats['extra'])
-    c5.metric("Gap Index", gap_index)
-    st.progress(min(int(readiness), 100), text=f"Readiness Score: {readiness}% (Higher is better)")
-    if not HIDE_GAP_DISTRIBUTION_CHART:
-        try:
-            import altair as alt
-            dist_df = pd.DataFrame([
-                {"Metric": "Met", "Share": pct(stats["met"])},
-                {"Metric": "Underdeveloped", "Share": pct(stats["underdeveloped"])},
-                {"Metric": "Missing", "Share": pct(stats["missing"])},
-            ])
-            chart = (
-                alt.Chart(dist_df)
-                .mark_bar()
-                .encode(
-                    x=alt.X("Share", title="Share (%)", scale=alt.Scale(domain=[0, 100])),
-                    y=alt.Y("Metric", sort=None),
-                    color=alt.Color("Metric",
-                                    legend=None,
-                                    scale=alt.Scale(
-                                        domain=["Met", "Underdeveloped", "Missing"],
-                                        range=["#2e7d32", "#f9a825", "#c62828"]
-                                    )),
-                    tooltip=["Metric", "Share"]
-                ).properties(height=120)
-            )
-            st.altair_chart(chart, use_container_width=True)
-        except Exception:
-            pass
-    if show_toggle:
-        with st.expander("Show detailed breakdown table", expanded=SHOW_DETAILED_GAP_TABLE_BY_DEFAULT):
-            rows = [
-                ("Total Required Skills", stats["total_required_skills"], 100.0),
-                ("Met", stats["met"], pct(stats["met"])),
-                ("Underdeveloped", stats["underdeveloped"], pct(stats["underdeveloped"])),
-                ("Missing", stats["missing"], pct(stats["missing"])),
-                ("Extra (Not Required)", stats["extra"], None),
-                ("Weighted Gap Index (0 best, 1 worst)", gap_index, None),
-                ("Readiness Score %", readiness, None),
-            ]
-            st.table(pd.DataFrame(rows, columns=["Metric", "Value", "Share (%)"]))
-
-# --------------------------------------------------
 # Tabs
 # --------------------------------------------------
 tabs = st.tabs(["Upskill Analysis & Plan", "Chosen Plan", "Progress Tracker"])
 
 # --------------------------------------------------
-# TAB 1: Analysis & Plan
+# TAB 1: Analysis & Plan (Option 1 Implementation)
 # --------------------------------------------------
 with tabs[0]:
     with st.expander("Instructions", expanded=False):
         st.markdown("""
-        1. Use the sample role skill matrix.
-        2. Select the target role.
-        3. Enter your current skills (optionally with levels: Python:3, SQL:2).
-        4. Analyze to generate gaps + AI learning plan.
-        5. Accept the plan to track progress.
+        1. Select the target role (table updates immediately).
+        2. Enter your current skills (Skill or Skill:Level).
+        3. Click Analyze to compute gaps and generate AI plan.
+        4. Accept the plan to enable tracking in Progress Tracker tab.
         """)
+
     df = load_role_skill_data()
     if df is None or "Role" not in df.columns:
         st.error("Failed to load role skill data.")
@@ -628,17 +643,19 @@ with tabs[0]:
 
     roles = sorted(df["Role"].dropna().unique().tolist())
 
-    with st.form("analysis_form", clear_on_submit=False):
-        col_left, col_right = st.columns([1, 1])
-        with col_left:
-            selected_role = st.selectbox("Select Role", roles, key="role_select")
-        with col_right:
-            st.write("Role Requirements")
-            st.dataframe(
-                df[df["Role"] == selected_role][["Skill", "Required_Level", "Skill_Category", "Weight"]],
-                use_container_width=True
-            )
+    # Reactive Role Selection OUTSIDE form
+    selected_role = st.selectbox("Select Role", roles, key="role_select")
 
+    st.caption("Role Requirements (updates immediately when role changes)")
+    st.dataframe(
+        df[df["Role"] == selected_role][["Skill", "Required_Level", "Skill_Category", "Weight"]],
+        use_container_width=True
+    )
+
+    st.divider()
+
+    # Form for skill input + analyze action
+    with st.form("analysis_form", clear_on_submit=False):
         user_skill_input = st.text_area(
             "Your Current Skills",
             height=110,
@@ -646,15 +663,21 @@ with tabs[0]:
         )
         submitted = st.form_submit_button("Analyze Skill Gap & Generate Plan")
 
+    # If role changed after last plan generation, optionally inform user
+    if st.session_state.get("latest_role") and st.session_state["latest_role"] != selected_role:
+        st.info("Role changed since last generated plan. Run analysis again to refresh gap & plan.")
+
     if submitted:
         user_skills_dict = parse_user_skills(user_skill_input)
         role_df = df[df["Role"] == selected_role]
+
         if role_df.empty:
             st.error("No data for that role.")
         else:
             gap = compute_skill_gap(role_df, user_skills_dict)
             stats = summarize_gap_stats(gap)
             course_suggestions = collect_course_suggestions(gap)
+
             st.session_state["latest_gap"] = gap
             st.session_state["latest_stats"] = stats
             st.session_state["latest_course_suggestions"] = course_suggestions
@@ -685,12 +708,15 @@ with tabs[0]:
             with st.spinner("Generating plan..."):
                 prompt = build_llm_prompt(selected_role, gap, stats, course_suggestions)
                 llm_output = call_gemini(prompt)
+
             st.session_state["latest_prompt"] = prompt
             st.session_state["latest_plan"] = llm_output
+
             st.markdown(llm_output)
             with st.expander("Prompt Debug"):
                 st.code(prompt, language="markdown")
 
+    # Post-generation action buttons
     if st.session_state.get("latest_plan"):
         st.divider()
         c1, c2, c3 = st.columns([1, 1, 2])
@@ -718,7 +744,10 @@ with tabs[0]:
                 st.success("Plan accepted. Track it in the Progress Tracker tab.")
         with c3:
             if st.button("Clear Generated Plan"):
-                for key in ["latest_gap", "latest_stats", "latest_course_suggestions", "latest_role", "latest_prompt", "latest_plan"]:
+                for key in [
+                    "latest_gap", "latest_stats", "latest_course_suggestions",
+                    "latest_role", "latest_prompt", "latest_plan"
+                ]:
                     st.session_state.pop(key, None)
                 st.info("Cleared.")
                 st.rerun()
@@ -750,28 +779,19 @@ with tabs[2]:
         st.info("Accept a learning plan first in the 'Upskill Analysis & Plan' tab.")
         st.stop()
 
-    # Ensure phase status alignment early
     ensure_phase_status()
 
-    # If phases exist and checkpoints are empty but user had them historically, we don't auto rebuild
-    # (Respect earlier decision to hide them). If you want auto-generation when hidden, uncomment below:
-    # if pt["start_date"] and pt["phase_weeks"] and not pt["checkpoints"]:
-    #     rebuild_checkpoints()
-
-    # Metrics
     metrics = compute_progress_metrics()
     total_weeks = sum(pt["phase_weeks"].values()) if pt["phase_weeks"] else 0
     elapsed_weeks = weeks_elapsed_since(pt["start_date"]) if pt["start_date"] else 0
     time_progress_pct = (elapsed_weeks / total_weeks * 100) if total_weeks else 0
 
-    # Phase-based completion metrics
     phase_pct_val_simple = compute_phase_completion_pct()
     phase_pct_val_weighted = compute_weighted_phase_completion()
 
-    # Decide which to treat as "overall"
     if USE_PHASE_COMPLETION_FOR_OVERALL_PROGRESS:
         overall_label = "Phase Completion"
-        overall_pct = phase_pct_val_weighted  # weighted view
+        overall_pct = phase_pct_val_weighted
     else:
         overall_label = "Checkpoint Completion"
         overall_pct = metrics["overall_pct"]
@@ -785,11 +805,9 @@ with tabs[2]:
 
     st.progress(min(int(overall_pct), 100))
 
-    # Phase Completion Controls
     if PHASE_COMPLETION_CHECKBOXES_ENABLED:
         render_phase_completion_controls()
 
-    # (Optional) Phase progress via checkpoints (kept for diagnostics if you enable them again)
     if metrics["phase_pct"] and SHOW_CHECKPOINT_SECTION:
         with st.expander("Phase Progress (Checkpoint-Based)", expanded=False):
             phase_bar_cols = st.columns(len(metrics["phase_pct"]))
@@ -801,7 +819,6 @@ with tabs[2]:
                         mark_phase_complete(p)
                         st.rerun()
 
-    # HIDDEN / OPTIONAL CHECKPOINT LIST
     if SHOW_CHECKPOINT_SECTION:
         st.markdown("### Checkpoints")
         if not pt["checkpoints"] and pt["phase_weeks"] and pt["start_date"]:
@@ -809,7 +826,6 @@ with tabs[2]:
                 rebuild_checkpoints(force=True)
                 st.rerun()
         elif pt["checkpoints"]:
-            # Minimal rendering; advanced filters removed if flag false
             filtered = pt["checkpoints"]
             for c in filtered:
                 label_parts = [status_badge(c), c['label']]
@@ -847,11 +863,14 @@ with tabs[2]:
                     st.success("Checkpoint added.")
                     st.rerun()
 
-    # Export / Backup
     st.markdown("### Export / Backup")
     exp_json = export_progress_json()
-    st.download_button("Download Progress JSON", data=exp_json,
-                       file_name="progress_tracker.json", mime="application/json")
+    st.download_button(
+        "Download Progress JSON",
+        data=exp_json,
+        file_name="progress_tracker.json",
+        mime="application/json"
+    )
 
     with st.expander("Advanced / Debug State"):
         st.code(exp_json, language="json")
@@ -873,7 +892,6 @@ with tabs[2]:
                     st.success("Rebuilt.")
                     st.rerun()
 
-    # Setup (Phases / Start Date / Hours)
     with st.expander("Setup (Start Date, Hours, Parse Phases)", expanded=False):
         setup_cols = st.columns([1, 1, 1])
         with setup_cols[0]:
@@ -902,7 +920,6 @@ with tabs[2]:
                 st.success("Default checkpoints created.")
                 st.rerun()
 
-    # Manage Phase Durations
     with st.expander("Manage Phase Durations", expanded=False):
         if not pt["phase_weeks"]:
             st.info("No phase durations defined yet. Use Auto-Parse above or manually set below.")
@@ -928,3 +945,7 @@ with tabs[2]:
                 rebuild_checkpoints(force=True)
                 st.success("Default checkpoints rebuilt.")
                 st.rerun()
+
+
+persist_session_to_json()
+

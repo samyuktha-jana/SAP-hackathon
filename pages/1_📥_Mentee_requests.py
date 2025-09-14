@@ -5,8 +5,9 @@ from agents.mentor_agent import _tool_approve_session
 from utils import notifications_panel
 
 # Inside the page (after login check)
-if st.session_state.user:
-    notifications_panel(st.session_state.user)
+if "user" in st.session_state and st.session_state["user"]:
+    notifications_panel(st.session_state["user"])
+
 
 
 # 🚨 Block page if no login

@@ -26,3 +26,5 @@ google-api-python-client
 streamlit
 streamlit_autorefresh
 -U ddgs
+
+reportlab
