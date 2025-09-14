@@ -406,7 +406,7 @@ with tab5:
             ticks += f'<line x1="{tx1:.1f}" y1="{ty1:.1f}" x2="{tx2:.1f}" y2="{ty2:.1f}" stroke="#333" stroke-width="2"/>'
 
         return f"""
-        <div style="text-align:center; margin:10px; display:inline-block;">
+        <div style="text-align:center; margin:10px; display:inline-block; font-family:'Poppins', sans-serif;font-weight: bold;">
         <svg width="120" height="80" viewBox="0 0 120 80">
             <path d="M10 70 A50 50 0 0 1 110 70" fill="none" stroke="#ccc" stroke-width="10"/>
             {ticks}
@@ -420,11 +420,13 @@ with tab5:
     gauges_html = f"""
     <div style="display:flex; justify-content:center;">
         {gauge("Modules", modules_pct*100, "#2e7d32")}
-        {gauge("Plan", plan_pct*100, "#1565c0")}
+        {gauge("Upskilling Plan", plan_pct*100, "#1565c0")}
         {gauge("Mentoring", mentor_pct*100, "#f9a825")}
     </div>
     """
     components.html(gauges_html, height=150)
+
+    
 
     st.markdown("---")
 
@@ -435,27 +437,28 @@ with tab5:
     car_x = 30 + (career_score / 100) * 400
 
     road_html = f"""
-    <div style="text-align:center; margin-top:20px;">
-      <svg width="100%" height="120" viewBox="0 0 500 120">
-        <!-- road -->
-        <rect x="20" y="60" width="460" height="30" fill="#555"/>
-        <line x1="30" y1="75" x2="470" y2="75" stroke="yellow" stroke-width="3" stroke-dasharray="15,15"/>
-        
-        <!-- car body -->
-        <rect x="{car_x}" y="15" width="70" height="40" rx="5" ry="5" fill="red"/>
+<div style="text-align:center; margin-top:20px;">
+  <svg width="100%" height="120" viewBox="0 0 1000 120" preserveAspectRatio="none">
+    <!-- road -->
+    <rect x="0" y="60" width="1000" height="30" fill="#555"/>
+    <line x1="0" y1="75" x2="1000" y2="75" stroke="yellow" stroke-width="3" stroke-dasharray="15,15"/>
+    
+    <!-- car body -->
+    <rect x="{car_x}" y="15" width="70" height="40" rx="5" ry="5" fill="red"/>
 
-        <!-- car windows -->
-        <rect x="{car_x + 8}" y="20" width="22" height="18"
-              fill="lightblue" stroke="black" stroke-width="1" rx="3" ry="3"/>
-        <rect x="{car_x + 40}" y="20" width="22" height="18"
-              fill="lightblue" stroke="black" stroke-width="1" rx="3" ry="3"/>
-        
-        <!-- wheels -->
-        <circle cx="{car_x + 15}" cy="60" r="10" fill="black"/>
-        <circle cx="{car_x + 55}" cy="60" r="10" fill="black"/>
-      </svg>
-    </div>
-    """
+    <!-- car windows -->
+    <rect x="{car_x + 8}" y="20" width="22" height="18"
+          fill="lightblue" stroke="black" stroke-width="1" rx="3" ry="3"/>
+    <rect x="{car_x + 40}" y="20" width="22" height="18"
+          fill="lightblue" stroke="black" stroke-width="1" rx="3" ry="3"/>
+    
+    <!-- wheels -->
+    <circle cx="{car_x + 15}" cy="60" r="10" fill="black"/>
+    <circle cx="{car_x + 55}" cy="60" r="10" fill="black"/>
+  </svg>
+</div>
+"""
+
     components.html(road_html, height=160)
 
     # -------------------------
