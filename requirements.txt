@@ -2,8 +2,7 @@
 rapidfuzz
 google-generativeai
 
-#samyuktha agent 
-Core
+
 
 grpcio
 grpcio-status
