@@ -16,9 +16,9 @@ langchain-core
 langchain-google-genai
 langchain-community 
 duckduckgo-search
---upgrade langchain-google-genai 
---upgrade google-generativeai 
---upgrade langchain-core
+langchain-google-genai 
+google-generativeai 
+langchain-core
 
 google-generativeai
 google-auth
