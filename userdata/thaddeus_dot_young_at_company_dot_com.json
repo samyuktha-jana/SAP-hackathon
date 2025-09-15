@@ -17,8 +17,8 @@
         "completed_at": "2025-09-14 14:19:15.703493"
       },
       "2": {
-        "completed": true,
-        "completed_at": "2025-09-14 14:19:45.434440"
+        "completed": false,
+        "completed_at": null
       },
       "3": {
         "completed": false,
