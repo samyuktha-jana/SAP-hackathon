@@ -1,0 +1,13 @@
+{
+  "chosen_upskillingplan": null,
+  "accepted_plan_role": null,
+  "accepted_at": null,
+  "progress_tracker": {
+    "start_date": null,
+    "weekly_hours": 5,
+    "phase_weeks": {},
+    "checkpoints": [],
+    "phase_status": {},
+    "created_at": "2025-09-21T11:57:37.355682"
+  }
+}

@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import random
 import pandas as pd
 from datetime import datetime, date, timedelta
 
@@ -9,48 +10,23 @@ import streamlit as st
 import google.generativeai as genai
 from dotenv import load_dotenv
 
+# --- Import session/auth utils ---
 from utils import notifications_panel
 from utils import hydrate_session_from_json, persist_session_to_json
 
-# after login check
+# --- Session hydration and notifications ---
 hydrate_session_from_json()
-
-
-# ==================================================
-# AUTH / NOTIFICATIONS (top so failures stop early)
-# ==================================================
 if "user" in st.session_state and st.session_state.user:
     notifications_panel(st.session_state.user)
-
-# --------------------------------------------------
-# Page Guard
-# --------------------------------------------------
-# st.set_page_config(page_title="Role Skill Gap Chatbot", layout="wide")
-
 if "user" not in st.session_state or not st.session_state.user:
     st.warning("⚠️ Please login from the Homepage first.")
     st.stop()
 
-# --------------------------------------------------
-# Title
-# --------------------------------------------------
+
+#st.set_page_config(page_title="Role Skill Gap Chatbot", layout="wide")
 st.title("Learning Hub")
 
-# ==============================
-# QUICK CONFIG FLAGS
-# ==============================
-HIDE_GAP_DISTRIBUTION_CHART = False                # Hide small bar chart in Gap Summary if True
-SHOW_DETAILED_GAP_TABLE_BY_DEFAULT = False         # Gap summary table expander open by default
-SHOW_CHECKPOINT_SECTION = False                    # If False, completely hide the old Checkpoints list UI
-SHOW_CHECKPOINT_FILTERS = False                    # (Only used if SHOW_CHECKPOINT_SECTION=True)
-SHOW_CHECKPOINT_DETAILS = False                    # (Only used if SHOW_CHECKPOINT_SECTION=True)
-SHOW_CHECKPOINT_DATES_INLINE = False               # (Only used if SHOW_CHECKPOINT_SECTION=True)
-PHASE_COMPLETION_CHECKBOXES_ENABLED = True         # Master switch for phase completion controls
-USE_PHASE_COMPLETION_FOR_OVERALL_PROGRESS = True   # If True, overall completion bar is phase-based
-
-# --------------------------------------------------
-# Environment & LLM Config
-# --------------------------------------------------
+# --- Environment & Gemini configuration ---
 load_dotenv()
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
 MODEL_NAME = "gemini-1.5-flash"
@@ -60,11 +36,19 @@ if GOOGLE_API_KEY:
     except Exception as _e:
         st.warning("Could not configure Gemini API (check key).")
 
-# --------------------------------------------------
-# Data Loading / Sample Data
-# --------------------------------------------------
+# --- Config flags for UI sections ---
+HIDE_GAP_DISTRIBUTION_CHART = False
+SHOW_DETAILED_GAP_TABLE_BY_DEFAULT = False
+SHOW_CHECKPOINT_SECTION = True
+SHOW_CHECKPOINT_FILTERS = False
+SHOW_CHECKPOINT_DETAILS = False
+SHOW_CHECKPOINT_DATES_INLINE = False
+PHASE_COMPLETION_CHECKBOXES_ENABLED = True
+USE_PHASE_COMPLETION_FOR_OVERALL_PROGRESS = True
+
 @st.cache_data
 def load_role_skill_data():
+    # Use your full role/skill table here
     data = [
         {"Role": "Data Analyst", "Skill": "SQL", "Required_Level": 4, "Skill_Category": "Data", "Weight": 1.0, "Description": "Advanced SQL for analytics", "Recommended_Courses": "BI101;BI201"},
         {"Role": "Data Analyst", "Skill": "Power BI", "Required_Level": 3, "Skill_Category": "Visualization", "Weight": 0.8, "Description": "Build dashboards & reports", "Recommended_Courses": "BI102"},
@@ -127,9 +111,7 @@ def load_role_skill_data():
     df.columns = [c.strip() for c in df.columns]
     return df
 
-# --------------------------------------------------
-# Utility: Parsing & Matching
-# --------------------------------------------------
+# --- Skill gap and matching utilities ---
 def parse_user_skills(raw_text):
     if not raw_text:
         return {}
@@ -159,7 +141,7 @@ def fuzzy_match_skill(skill, candidate_skills, threshold=85):
         return match, score
     return skill, score
 
-def compute_skill_gap(df_role, user_skills_dict, fuzzy=True):
+def compute_skill_gap(df_role, user_skills_dict, fuzzy=True, priority_skills=None, priority_weight=2.0):
     required_rows = df_role.copy()
     canonical_skills = required_rows["Skill"].tolist()
     normalized_user = {}
@@ -178,6 +160,9 @@ def compute_skill_gap(df_role, user_skills_dict, fuzzy=True):
         weight = row.get("Weight", 1.0)
         desc = row.get("Description", "")
         base_courses = row.get("Recommended_Courses", "")
+        # Prioritize feedback skills by increasing weight
+        if priority_skills and req_skill in priority_skills:
+            weight = priority_weight
         user_level = normalized_user.get(req_skill, None)
 
         if user_level is None:
@@ -187,7 +172,7 @@ def compute_skill_gap(df_role, user_skills_dict, fuzzy=True):
             })
         else:
             if (req_level is not None and isinstance(req_level, (int, float))
-                    and user_level is not None):
+                and user_level is not None):
                 if user_level >= req_level:
                     gap["met"].append({
                         "skill": req_skill, "required_level": req_level, "user_level": user_level,
@@ -242,9 +227,7 @@ def summarize_gap_stats(gap):
 EXTERNAL_COURSE_INDEX = {
     "Python": ["Coursera: Python for Everybody", "Internal: DS101", "LeetCode practice sets"],
     "SQL": ["Internal: DS102", "Mode Analytics SQL Tutorial", "Coursera: Advanced SQL"],
-    "Statistics": ["Internal: DS103", "Khan Academy: Statistics & Probability"],
-    "Machine Learning": ["Internal: DS201", "Andrew Ng ML", "Hands-On ML Book"],
-    "Airflow": ["Astronomer Academy Core", "Internal: DE201"]
+    # Add more as needed...
 }
 
 def collect_course_suggestions(gap):
@@ -260,7 +243,7 @@ def collect_course_suggestions(gap):
             suggestions[item["skill"]] = accumulate(item["skill"], item.get("base_courses"))
     return suggestions
 
-def build_llm_prompt(role, gap, stats, course_suggestions):
+def build_llm_prompt(role, gap, stats, course_suggestions, priority_skills=None, prioritize_in_phase1=True):
     def fmt_skill_list(items, show_gap=False):
         lines = []
         for it in items:
@@ -279,6 +262,17 @@ def build_llm_prompt(role, gap, stats, course_suggestions):
         if courses:
             course_text.append(f"{skill}: {', '.join(courses)}")
     course_block = "\n".join(course_text) if course_text else "No baseline course suggestions found."
+
+    priority_block = ""
+    if priority_skills:
+        priority_block = (
+            "\nManager feedback indicates these skills should be prioritized in the upskilling roadmap:\n"
+            + "\n".join(f"- {s}" for s in priority_skills)
+        )
+        if prioritize_in_phase1:
+            priority_block += "\nPlace these skills in Phase 1 (quick wins) if possible, unless advanced skills are required."
+        else:
+            priority_block += "\nIncrease their importance, but phase assignment is flexible."
 
     return f"""
 You are a professional upskilling advisor.
@@ -304,6 +298,8 @@ Met Skills:
 Baseline Course Suggestions (raw):
 {course_block}
 
+{priority_block}
+
 TASK:
 1. Produce a prioritized learning roadmap (Phase 1 quick wins, Phase 2 core, Phase 3 advanced).
 2. For each skill in phases: rationale (1 sentence), 1–2 courses, mini practice project.
@@ -322,78 +318,36 @@ def call_gemini(prompt):
     except Exception as e:
         return f"Error calling Gemini: {e}"
 
-# --------------------------------------------------
-# Gap Summary Renderer
-# --------------------------------------------------
-def render_gap_summary(stats: dict, show_toggle: bool = True):
-    if not stats:
-        st.info("No stats available.")
-        return
-    total = stats["total_required_skills"] or 1
+# --- Feedback Section ---
+def generate_fake_feedback(user_name, skills):
+    feedback_templates = [
+        "Great work in {skill}! Shows strong proficiency.",
+        "Needs improvement in {skill}.",
+        "Impressive progress in {skill}.",
+        "Should focus more on {skill}, lacking depth.",
+        "Excellent understanding of {skill}.",
+        "Struggled with {skill}, requires more practice."
+    ]
+    feedback = []
+    for skill in random.sample(skills, min(3, len(skills))):
+        template = random.choice(feedback_templates)
+        feedback.append(template.format(skill=skill))
+    return feedback
 
-    def pct(v):
-        return round(v / total * 100, 1) if total else 0
+def extract_feedback_sentiment(feedback_list):
+    pos_keywords = ["great", "impressive", "excellent", "strong"]
+    neg_keywords = ["improve", "struggle", "lacking", "needs", "requires", "focus more"]
+    results = []
+    for text in feedback_list:
+        skill_match = [w for w in load_role_skill_data()["Skill"].unique() if w in text]
+        skill = skill_match[0] if skill_match else None
+        sentiment = "positive" if any(k in text.lower() for k in pos_keywords) else (
+            "negative" if any(k in text.lower() for k in neg_keywords) else "neutral"
+        )
+        results.append({"text": text, "skill": skill, "sentiment": sentiment})
+    return results
 
-    gap_index = stats["weighted_gap_index"]
-    readiness = round((1 - gap_index) * 100, 1)
-
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Met", f"{stats['met']} ({pct(stats['met'])}%)")
-    c2.metric("Underdeveloped", f"{stats['underdeveloped']} ({pct(stats['underdeveloped'])}%)")
-    c3.metric("Missing", f"{stats['missing']} ({pct(stats['missing'])}%)")
-    c4.metric("Extra", stats['extra'])
-    c5.metric("Gap Index", gap_index)
-
-    st.progress(min(int(readiness), 100),
-                text=f"Readiness Score: {readiness}% (Higher is better)")
-
-    if not HIDE_GAP_DISTRIBUTION_CHART:
-        try:
-            import altair as alt
-            dist_df = pd.DataFrame([
-                {"Metric": "Met", "Share": pct(stats["met"])},
-                {"Metric": "Underdeveloped", "Share": pct(stats["underdeveloped"])},
-                {"Metric": "Missing", "Share": pct(stats["missing"])},
-            ])
-            chart = (
-                alt.Chart(dist_df)
-                .mark_bar()
-                .encode(
-                    x=alt.X("Share", title="Share (%)", scale=alt.Scale(domain=[0, 100])),
-                    y=alt.Y("Metric", sort=None),
-                    color=alt.Color(
-                        "Metric",
-                        legend=None,
-                        scale=alt.Scale(
-                            domain=["Met", "Underdeveloped", "Missing"],
-                            range=["#2e7d32", "#f9a825", "#c62828"]
-                        )
-                    ),
-                    tooltip=["Metric", "Share"]
-                )
-                .properties(height=120)
-            )
-            st.altair_chart(chart, use_container_width=True)
-        except Exception:
-            pass
-
-    if show_toggle:
-        with st.expander("Show detailed breakdown table", expanded=SHOW_DETAILED_GAP_TABLE_BY_DEFAULT):
-            readiness_score = readiness
-            rows = [
-                ("Total Required Skills", stats["total_required_skills"], 100.0),
-                ("Met", stats["met"], pct(stats["met"])),
-                ("Underdeveloped", stats["underdeveloped"], pct(stats["underdeveloped"])),
-                ("Missing", stats["missing"], pct(stats["missing"])),
-                ("Extra (Not Required)", stats["extra"], None),
-                ("Weighted Gap Index (0 best, 1 worst)", gap_index, None),
-                ("Readiness Score %", readiness_score, None),
-            ]
-            st.table(pd.DataFrame(rows, columns=["Metric", "Value", "Share (%)"]))
-
-# --------------------------------------------------
-# Progress Tracker Helpers
-# --------------------------------------------------
+# --- Progress Tracker Helpers ---
 PHASE_PATTERN = re.compile(r"(Phase\s+(\d+))[^0-9]*(\b(\d+)\s*weeks?\b)", re.IGNORECASE)
 
 def parse_phase_durations(plan_markdown: str):
@@ -436,7 +390,7 @@ def build_default_checkpoints(phase_weeks: dict, start_date: date):
             "completed_at": None
         })
         if weeks > 2:
-            mid_date = current_start + timedelta(weeks=weeks / 2)
+            mid_date = current_start + timedelta(weeks=weeks // 2)
             checkpoints.append({
                 "id": f"phase{phase_no}_mid",
                 "label": f"{label} Midpoint",
@@ -619,42 +573,75 @@ def render_phase_completion_controls():
     if changed:
         st.rerun()
 
-# --------------------------------------------------
-# Tabs
-# --------------------------------------------------
+# --- Tabs ---
 tabs = st.tabs(["Upskill Analysis & Plan", "Chosen Plan", "Progress Tracker"])
 
-# --------------------------------------------------
-# TAB 1: Analysis & Plan (Option 1 Implementation)
-# --------------------------------------------------
+# --- TAB 1: Analysis & Plan ---
 with tabs[0]:
     with st.expander("Instructions", expanded=False):
         st.markdown("""
         1. Select the target role (table updates immediately).
         2. Enter your current skills (Skill or Skill:Level).
-        3. Click Analyze to compute gaps and generate AI plan.
-        4. Accept the plan to enable tracking in Progress Tracker tab.
+        3. Optionally review manager feedback and prioritize flagged skills.
+        4. Click Analyze to compute gaps and generate AI plan.
+        5. Accept the plan to enable tracking in Progress Tracker tab.
         """)
 
     df = load_role_skill_data()
-    if df is None or "Role" not in df.columns:
-        st.error("Failed to load role skill data.")
-        st.stop()
-
     roles = sorted(df["Role"].dropna().unique().tolist())
-
-    # Reactive Role Selection OUTSIDE form
     selected_role = st.selectbox("Select Role", roles, key="role_select")
-
+    role_df = df[df["Role"] == selected_role]
     st.caption("Role Requirements (updates immediately when role changes)")
     st.dataframe(
-        df[df["Role"] == selected_role][["Skill", "Required_Level", "Skill_Category", "Weight"]],
+        role_df[["Skill", "Required_Level", "Skill_Category", "Weight"]],
         use_container_width=True
     )
 
     st.divider()
 
-    # Form for skill input + analyze action
+    with st.expander("Manager Feedback (Demo)", expanded=True):
+        st.write("This section demonstrates extracting and analyzing manager feedback for skills.")
+
+        role_skills = role_df["Skill"].tolist()
+        # Persist demo feedback per role to avoid changing on Streamlit reruns
+        # (e.g., when submitting forms or clicking buttons that trigger a rerun).
+        feedback_key = f"feedback_{selected_role}"
+        if feedback_key not in st.session_state:
+            st.session_state[feedback_key] = generate_fake_feedback(
+                st.session_state.get("user", "Employee"), role_skills
+            )
+        feedback_samples = st.session_state[feedback_key]
+
+        st.write("Sample Feedback:")
+        for fb in feedback_samples:
+            st.write(f"- {fb}")
+
+        analyzed_feedback = extract_feedback_sentiment(feedback_samples)
+        fb_df = pd.DataFrame(analyzed_feedback)
+
+        st.write("Feedback Analysis:")
+        st.dataframe(fb_df, use_container_width=True)
+
+        pos_skills = fb_df[fb_df["sentiment"] == "positive"]["skill"].dropna().tolist()
+        neg_skills = fb_df[fb_df["sentiment"] == "negative"]["skill"].dropna().unique().tolist()
+
+        st.markdown(f"**Positive Feedback Skills:** {', '.join(pos_skills) if pos_skills else 'None'}")
+        st.markdown(f"**Negative Feedback Skills:** {', '.join(neg_skills) if neg_skills else 'None'}")
+
+        st.session_state["priority_skills_from_feedback"] = neg_skills
+
+        st.info("Skills flagged in negative feedback will be prioritized in your learning roadmap.")
+
+    st.subheader("Customize Prioritization Strength for Feedback-flagged Skills")
+    prioritize_in_phase1 = st.checkbox(
+        "Always place feedback-flagged skills in Phase 1 (quick wins)?",
+        value=True
+    )
+    priority_weight = st.slider(
+        "Increase weight for feedback-flagged skills (higher means more urgent in skill gap calculation):",
+        min_value=1.0, max_value=5.0, value=2.0, step=0.1
+    )
+
     with st.form("analysis_form", clear_on_submit=False):
         user_skill_input = st.text_area(
             "Your Current Skills",
@@ -663,60 +650,63 @@ with tabs[0]:
         )
         submitted = st.form_submit_button("Analyze Skill Gap & Generate Plan")
 
-    # If role changed after last plan generation, optionally inform user
-    if st.session_state.get("latest_role") and st.session_state["latest_role"] != selected_role:
-        st.info("Role changed since last generated plan. Run analysis again to refresh gap & plan.")
-
     if submitted:
         user_skills_dict = parse_user_skills(user_skill_input)
-        role_df = df[df["Role"] == selected_role]
+        priority_skills = st.session_state.get("priority_skills_from_feedback", [])
 
-        if role_df.empty:
-            st.error("No data for that role.")
-        else:
-            gap = compute_skill_gap(role_df, user_skills_dict)
-            stats = summarize_gap_stats(gap)
-            course_suggestions = collect_course_suggestions(gap)
+        gap = compute_skill_gap(
+            role_df,
+            user_skills_dict,
+            fuzzy=True,
+            priority_skills=priority_skills,
+            priority_weight=priority_weight
+        )
 
-            st.session_state["latest_gap"] = gap
-            st.session_state["latest_stats"] = stats
-            st.session_state["latest_course_suggestions"] = course_suggestions
-            st.session_state["latest_role"] = selected_role
+        stats = summarize_gap_stats(gap)
+        course_suggestions = collect_course_suggestions(gap)
 
-            st.subheader("Gap Summary")
-            render_gap_summary(stats)
+        st.session_state["latest_gap"] = gap
+        st.session_state["latest_stats"] = stats
+        st.session_state["latest_course_suggestions"] = course_suggestions
+        st.session_state["latest_role"] = selected_role
 
-            gap_tabs = st.tabs(["Missing", "Underdeveloped", "Met", "Extra"])
-            with gap_tabs[0]:
-                st.write(pd.DataFrame(gap["missing"]) if gap["missing"] else "No missing skills.")
-            with gap_tabs[1]:
-                st.write(pd.DataFrame(gap["underdeveloped"]) if gap["underdeveloped"] else "No underdeveloped skills.")
-            with gap_tabs[2]:
-                st.write(pd.DataFrame(gap["met"]) if gap["met"] else "None met yet.")
-            with gap_tabs[3]:
-                st.write(pd.DataFrame(gap["extra"]) if gap["extra"] else "No extra skills.")
+        st.subheader("Gap Summary")
+        st.write(stats)
 
-            st.subheader("Course Suggestions")
-            if course_suggestions:
-                for skill, courses in course_suggestions.items():
-                    st.markdown(f"**{skill}:** {', '.join(courses)}")
-            else:
-                st.write("None available.")
+        gap_tabs = st.tabs(["Missing", "Underdeveloped", "Met", "Extra"])
+        with gap_tabs[0]:
+            st.write(pd.DataFrame(gap["missing"]) if gap["missing"] else "No missing skills.")
+        with gap_tabs[1]:
+            st.write(pd.DataFrame(gap["underdeveloped"]) if gap["underdeveloped"] else "No underdeveloped skills.")
+        with gap_tabs[2]:
+            st.write(pd.DataFrame(gap["met"]) if gap["met"] else "None met yet.")
+        with gap_tabs[3]:
+            st.write(pd.DataFrame(gap["extra"]) if gap["extra"] else "No extra skills.")
 
-            st.divider()
-            st.subheader("Gemini Learning Plan")
-            with st.spinner("Generating plan..."):
-                prompt = build_llm_prompt(selected_role, gap, stats, course_suggestions)
-                llm_output = call_gemini(prompt)
+        st.subheader("Course Suggestions")
+        for skill, courses in course_suggestions.items():
+            st.markdown(f"**{skill}:** {', '.join(courses)}")
 
-            st.session_state["latest_prompt"] = prompt
-            st.session_state["latest_plan"] = llm_output
+        st.divider()
+        st.subheader("Gemini Learning Plan")
+        with st.spinner("Generating plan..."):
+            prompt = build_llm_prompt(
+                selected_role,
+                gap,
+                stats,
+                course_suggestions,
+                priority_skills=priority_skills,
+                prioritize_in_phase1=prioritize_in_phase1
+            )
+            llm_output = call_gemini(prompt)
 
-            st.markdown(llm_output)
-            with st.expander("Prompt Debug"):
-                st.code(prompt, language="markdown")
+        st.session_state["latest_prompt"] = prompt
+        st.session_state["latest_plan"] = llm_output
 
-    # Post-generation action buttons
+        st.markdown(llm_output)
+        with st.expander("Prompt Debug"):
+            st.code(prompt, language="markdown")
+
     if st.session_state.get("latest_plan"):
         st.divider()
         c1, c2, c3 = st.columns([1, 1, 2])
@@ -728,7 +718,9 @@ with tabs[0]:
                             st.session_state["latest_role"],
                             st.session_state["latest_gap"],
                             st.session_state["latest_stats"],
-                            st.session_state["latest_course_suggestions"]
+                            st.session_state["latest_course_suggestions"],
+                            priority_skills=st.session_state.get("priority_skills_from_feedback", []),
+                            prioritize_in_phase1=prioritize_in_phase1
                         )
                         new_plan = call_gemini(new_prompt)
                     st.session_state["latest_prompt"] = new_prompt
@@ -752,9 +744,7 @@ with tabs[0]:
                 st.info("Cleared.")
                 st.rerun()
 
-# --------------------------------------------------
-# TAB 2: Chosen Plan
-# --------------------------------------------------
+# --- TAB 2: Chosen Plan ---
 with tabs[1]:
     st.header("Your Accepted Plan")
     chosen_plan = st.session_state.get("chosen_upskillingplan")
@@ -766,12 +756,9 @@ with tabs[1]:
     else:
         st.info("No plan accepted yet.")
 
-# --------------------------------------------------
-# TAB 3: Progress Tracker
-# --------------------------------------------------
+# --- TAB 3: Progress Tracker ---
 with tabs[2]:
     st.header("📈 Progress Tracker")
-
     init_progress_state()
     pt = st.session_state["progress_tracker"]
 
@@ -789,12 +776,8 @@ with tabs[2]:
     phase_pct_val_simple = compute_phase_completion_pct()
     phase_pct_val_weighted = compute_weighted_phase_completion()
 
-    if USE_PHASE_COMPLETION_FOR_OVERALL_PROGRESS:
-        overall_label = "Phase Completion"
-        overall_pct = phase_pct_val_weighted
-    else:
-        overall_label = "Checkpoint Completion"
-        overall_pct = metrics["overall_pct"]
+    overall_label = "Phase Completion" if USE_PHASE_COMPLETION_FOR_OVERALL_PROGRESS else "Checkpoint Completion"
+    overall_pct = phase_pct_val_weighted if USE_PHASE_COMPLETION_FOR_OVERALL_PROGRESS else metrics["overall_pct"]
 
     m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric(overall_label, f"{overall_pct:.1f}%")
@@ -807,17 +790,6 @@ with tabs[2]:
 
     if PHASE_COMPLETION_CHECKBOXES_ENABLED:
         render_phase_completion_controls()
-
-    if metrics["phase_pct"] and SHOW_CHECKPOINT_SECTION:
-        with st.expander("Phase Progress (Checkpoint-Based)", expanded=False):
-            phase_bar_cols = st.columns(len(metrics["phase_pct"]))
-            for i, (p, pct) in enumerate(sorted(metrics["phase_pct"].items())):
-                with phase_bar_cols[i]:
-                    st.write(f"Phase {p}")
-                    st.progress(min(int(pct), 100))
-                    if st.button(f"Mark Phase {p} Complete", key=f"markphase_{p}"):
-                        mark_phase_complete(p)
-                        st.rerun()
 
     if SHOW_CHECKPOINT_SECTION:
         st.markdown("### Checkpoints")
@@ -880,17 +852,16 @@ with tabs[2]:
                 st.session_state.pop("progress_tracker", None)
                 st.success("Progress tracker reset.")
                 st.rerun()
-        if SHOW_CHECKPOINT_SECTION:
-            with cols_dbg[1]:
-                if st.button("Clear All Checkpoints"):
-                    pt["checkpoints"] = []
-                    st.warning("Checkpoints cleared.")
-                    st.rerun()
-            with cols_dbg[2]:
-                if st.button("Rebuild Checkpoints (Force)"):
-                    rebuild_checkpoints(force=True)
-                    st.success("Rebuilt.")
-                    st.rerun()
+        with cols_dbg[1]:
+            if st.button("Clear All Checkpoints"):
+                pt["checkpoints"] = []
+                st.warning("Checkpoints cleared.")
+                st.rerun()
+        with cols_dbg[2]:
+            if st.button("Rebuild Checkpoints (Force)"):
+                rebuild_checkpoints(force=True)
+                st.success("Rebuilt.")
+                st.rerun()
 
     with st.expander("Setup (Start Date, Hours, Parse Phases)", expanded=False):
         setup_cols = st.columns([1, 1, 1])
@@ -914,7 +885,7 @@ with tabs[2]:
                     st.success(f"Parsed phases: {parsed}")
                 else:
                     st.warning("Could not detect numeric phase durations in plan.")
-        if pt["start_date"] and pt["phase_weeks"] and SHOW_CHECKPOINT_SECTION and not pt["checkpoints"]:
+        if pt["start_date"] and pt["phase_weeks"] and not pt["checkpoints"]:
             if st.button("Generate Default Checkpoints"):
                 rebuild_checkpoints(force=True)
                 st.success("Default checkpoints created.")
@@ -940,12 +911,9 @@ with tabs[2]:
                 ensure_phase_status()
                 st.success("Phase durations updated.")
 
-        if pt["phase_weeks"] and SHOW_CHECKPOINT_SECTION:
             if st.button("Rebuild Default Checkpoints (Overwrite)"):
                 rebuild_checkpoints(force=True)
                 st.success("Default checkpoints rebuilt.")
                 st.rerun()
 
-
 persist_session_to_json()
-
