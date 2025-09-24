@@ -26,5 +26,18 @@
       }
     },
     "created_at": "2025-09-14T14:17:52.671836"
+  },
+  "manager_feedback": {
+    "text": "You're proactive and collaborate well. However, dashboards in Power BI lack depth and need more advanced features.",
+    "scores": {
+      "neg": 0.102,
+      "neu": 0.578,
+      "pos": 0.32,
+      "compound": 0.5984
+    },
+    "compound": 0.598,
+    "sentiment_label": "Positive",
+    "highlights": null,
+    "analyzed_at": "2025-09-24T16:28:33.899641"
   }
 }

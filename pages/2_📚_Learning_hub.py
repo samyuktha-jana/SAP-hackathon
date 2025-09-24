@@ -6,6 +6,7 @@ from datetime import datetime, date, timedelta
 
 from rapidfuzz import fuzz, process
 import streamlit as st
+import plotly.express as px
 try:
     import importlib
     _vader_mod = importlib.import_module("vaderSentiment.vaderSentiment")
@@ -405,8 +406,8 @@ def render_gap_summary(stats: dict, show_toggle: bool = True):
                 alt.Chart(dist_df)
                 .mark_bar()
                 .encode(
-                    x=alt.X("Share", title="Share (%)", scale=alt.Scale(domain=[0, 100])),
-                    y=alt.Y("Metric", sort=None),
+                    x=alt.X("Metric", sort=None, title="Metric"),
+                    y=alt.Y("Share", title="Share (%)", scale=alt.Scale(domain=[0, 100])),
                     color=alt.Color(
                         "Metric",
                         legend=None,
@@ -417,7 +418,7 @@ def render_gap_summary(stats: dict, show_toggle: bool = True):
                     ),
                     tooltip=["Metric", "Share"]
                 )
-                .properties(height=120)
+                .properties(height=220)
             )
             st.altair_chart(chart, use_container_width=True)
         except Exception:
@@ -436,6 +437,151 @@ def render_gap_summary(stats: dict, show_toggle: bool = True):
                 ("Readiness Score %", readiness_score, None),
             ]
             st.table(pd.DataFrame(rows, columns=["Metric", "Value", "Share (%)"]))
+
+# --------------------------------------------------
+# Visualization helpers for Tab 1 (Plotly-based)
+# --------------------------------------------------
+def _role_overview_charts(role_df_view: pd.DataFrame):
+    """Return (pie, bar) figures summarizing role requirements."""
+    try:
+        # Category distribution (donut)
+        cat_counts = (
+            role_df_view["Skill_Category"].fillna("Uncategorized").value_counts().reset_index()
+        )
+        cat_counts.columns = ["Skill_Category", "Count"]
+        pie = px.pie(
+            cat_counts,
+            values="Count",
+            names="Skill_Category",
+            hole=0.45,
+            title="Skill Categories",
+            color_discrete_sequence=px.colors.qualitative.Set3,
+        )
+        pie.update_traces(textposition="inside", textinfo="percent+label")
+
+        # Required level per skill (horizontal bar)
+        bar_df = role_df_view.copy()
+        bar_df["Skill"] = bar_df["Skill"].astype(str)
+        bar = px.bar(
+            bar_df.sort_values("Required_Level", ascending=True),
+            x="Required_Level",
+            y="Skill",
+            color="Skill_Category",
+            orientation="h",
+            title="Required Level by Skill",
+            color_discrete_sequence=px.colors.qualitative.Set2,
+        )
+        bar.update_layout(yaxis_title="", xaxis_title="Level")
+        return pie, bar
+    except Exception:
+        return None, None
+
+def _build_gap_dataframe(gap: dict, role_df_view: pd.DataFrame) -> pd.DataFrame:
+    """Flatten gap dict to a dataframe suitable for charts."""
+    cat_map = {row.Skill: row.Skill_Category for row in role_df_view.itertuples()}
+    rows = []
+    for section in ("missing", "underdeveloped", "met"):
+        for it in gap.get(section, []):
+            req = it.get("required_level")
+            user = it.get("user_level")
+            if section == "missing":
+                user_num = 0
+                gap_val = (req or 0) - user_num
+            elif section == "underdeveloped":
+                user_num = user or 0
+                gap_val = max((req or 0) - user_num, 0)
+            else:  # met
+                user_num = user or 0
+                gap_val = 0
+            rows.append({
+                "Skill": it.get("skill"),
+                "Status": section.capitalize(),
+                "Required_Level": req,
+                "User_Level": user_num,
+                "Gap_Value": gap_val,
+                "Weight": it.get("weight", 1.0),
+                "Skill_Category": cat_map.get(it.get("skill"), "Uncategorized"),
+            })
+    for it in gap.get("extra", []):
+        rows.append({
+            "Skill": it.get("skill"),
+            "Status": "Extra",
+            "Required_Level": None,
+            "User_Level": it.get("user_level") or 0,
+            "Gap_Value": 0,
+            "Weight": 0,
+            "Skill_Category": "Extra",
+        })
+    return pd.DataFrame(rows) if rows else pd.DataFrame(
+        columns=["Skill", "Status", "Required_Level", "User_Level", "Gap_Value", "Weight", "Skill_Category"]
+    )
+
+def _gap_visual_charts(gap: dict, role_df_view: pd.DataFrame):
+    """Return (gap_bar, comp_bar, cat_bar) figures visualizing gaps."""
+    try:
+        df = _build_gap_dataframe(gap, role_df_view)
+        if df.empty:
+            return None, None, None
+
+        # Focus: gap magnitude by skill
+        focus = df[df["Status"].isin(["Missing", "Underdeveloped"])].copy()
+        focus = focus[focus["Gap_Value"] > 0]
+        gap_bar = None
+        if not focus.empty:
+            gap_bar = px.bar(
+                focus.sort_values(["Gap_Value", "Weight"], ascending=[False, False]),
+                x="Gap_Value",
+                y="Skill",
+                color="Status",
+                orientation="h",
+                hover_data={"Required_Level": True, "User_Level": True, "Weight": True, "Skill_Category": True},
+                title="Gap by Skill (higher means bigger gap)",
+                color_discrete_map={"Missing": "#e11d48", "Underdeveloped": "#f59e0b"},
+            )
+            gap_bar.update_layout(yaxis_title="", xaxis_title="Gap (Req - You)")
+
+        # Comparison: Required vs You
+        comp = df[df["Status"].isin(["Missing", "Underdeveloped"])].copy()
+        comp_long = comp.melt(
+            id_vars=["Skill", "Skill_Category"],
+            value_vars=["Required_Level", "User_Level"],
+            var_name="Type",
+            value_name="Level",
+        )
+        comp_bar = None
+        if not comp_long.empty:
+            comp_bar = px.bar(
+                comp_long.sort_values(["Level"], ascending=True),
+                x="Level",
+                y="Skill",
+                color="Type",
+                barmode="group",
+                orientation="h",
+                title="Required vs Your Level",
+                color_discrete_map={"Required_Level": "#2563eb", "User_Level": "#10b981"},
+            )
+            comp_bar.update_layout(yaxis_title="", xaxis_title="Level")
+
+        # Category intensity
+        if not focus.empty:
+            cat = focus.groupby("Skill_Category", as_index=False)["Gap_Value"].sum().sort_values("Gap_Value", ascending=False)
+        else:
+            cat = pd.DataFrame(columns=["Skill_Category", "Gap_Value"])
+        cat_bar = None
+        if not cat.empty:
+            cat_bar = px.bar(
+                cat,
+                x="Skill_Category",
+                y="Gap_Value",
+                color="Gap_Value",
+                color_continuous_scale="OrRd",
+                title="Gap Intensity by Category",
+            )
+            cat_bar.update_layout(xaxis_title="Category", yaxis_title="Total Gap")
+
+        return gap_bar, comp_bar, cat_bar
+    except Exception:
+        return None, None, None
 
 # --------------------------------------------------
 # Progress Tracker Helpers
@@ -704,11 +850,17 @@ with tabs[0]:
         chips_html.append(f'<span class="lh-chip">{label}: {cnt}</span>')
     st.markdown(" ".join(chips_html), unsafe_allow_html=True)
 
-    st.dataframe(
-        role_df_view,
-        use_container_width=True,
-        hide_index=True,
-    )
+    st.dataframe(role_df_view, use_container_width=True, hide_index=True)
+
+    # Visual overview for quick scanning (only Tab 1)
+    ov1, ov2 = st.columns(2)
+    pie, bar = _role_overview_charts(role_df_view)
+    with ov1:
+        if pie is not None:
+            st.plotly_chart(pie, use_container_width=True)
+    with ov2:
+        if bar is not None:
+            st.plotly_chart(bar, use_container_width=True)
 
     st.divider()
 
@@ -774,22 +926,42 @@ with tabs[0]:
             }
             fb_analyzed = True
 
-    # Show current feedback summary if present
+    # Show only Positive vs Negative comparison if present
     cur_fb = st.session_state.get("manager_feedback")
     if cur_fb:
-        st.markdown(
-            f"""
-            <div class="lh-card">
-                <div class="lh-section">Current Feedback Snapshot</div>
-                <div class="lh-small lh-muted">Sentiment: <b>{cur_fb.get('sentiment_label')}</b> (compound {cur_fb.get('compound')})</div>
-                <div class="lh-small">Highlights: {cur_fb.get('highlights') or '—'}</div>
-                <details style="margin-top:6px;"><summary class="lh-small">Show full text</summary>
-                <pre style="white-space:pre-wrap">{cur_fb.get('text')}</pre>
-                </details>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+        # Positive vs Negative comparison (metrics + mini chart)
+        scores = cur_fb.get("scores") or {}
+        try:
+            pos_pct = round(float(scores.get("pos", 0.0)) * 100, 1)
+            neg_pct = round(float(scores.get("neg", 0.0)) * 100, 1)
+            comp_cols = st.columns(2)
+            with comp_cols[0]:
+                st.metric("Positive", f"{pos_pct}%")
+            with comp_cols[1]:
+                st.metric("Negative", f"{neg_pct}%")
+            df_comp = pd.DataFrame([
+                {"Sentiment": "Positive", "Percent": pos_pct},
+                {"Sentiment": "Negative", "Percent": neg_pct},
+            ])
+            fig_comp = px.bar(
+                df_comp,
+                x="Sentiment",
+                y="Percent",
+                color="Sentiment",
+                color_discrete_map={"Positive": "#10b981", "Negative": "#ef4444"},
+                title="Positive vs Negative",
+            )
+            fig_comp.update_layout(
+                height=220,
+                yaxis_title="%",
+                xaxis_title="",
+                showlegend=False,
+                margin=dict(l=10, r=10, t=40, b=10),
+                yaxis=dict(range=[0, 100])
+            )
+            st.plotly_chart(fig_comp, use_container_width=True)
+        except Exception:
+            pass
         cfb1, cfb2 = st.columns(2)
         with cfb1:
             if st.button("Clear Feedback"):
@@ -830,6 +1002,19 @@ with tabs[0]:
 
             st.subheader("Gap Summary")
             render_gap_summary(stats)
+
+            # Visual Gap Explorer (only Tab 1) inside a closed-by-default dropdown
+            with st.expander("Visual Gap Explorer", expanded=False):
+                gap_bar, comp_bar, cat_bar = _gap_visual_charts(gap, role_df_view)
+                gcols = st.columns(2)
+                with gcols[0]:
+                    if gap_bar is not None:
+                        st.plotly_chart(gap_bar, use_container_width=True)
+                with gcols[1]:
+                    if comp_bar is not None:
+                        st.plotly_chart(comp_bar, use_container_width=True)
+                if cat_bar is not None:
+                    st.plotly_chart(cat_bar, use_container_width=True)
 
             gap_tabs = st.tabs(["Missing", "Underdeveloped", "Met", "Extra"])
             with gap_tabs[0]:
