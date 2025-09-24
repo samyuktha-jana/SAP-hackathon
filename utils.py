@@ -155,7 +155,13 @@ def hydrate_session_from_json():
 
     if "hydrated_from_json" not in st.session_state:
         user_data = load_user_data(user_email)
-        for key in ["chosen_upskillingplan", "accepted_plan_role", "accepted_at", "progress_tracker"]:
+        for key in [
+            "chosen_upskillingplan",
+            "accepted_plan_role",
+            "accepted_at",
+            "progress_tracker",
+            "manager_feedback",
+        ]:
             if key in user_data:
                 st.session_state[key] = user_data[key]
         st.session_state["hydrated_from_json"] = True
@@ -171,5 +177,6 @@ def persist_session_to_json():
         "chosen_upskillingplan": st.session_state.get("chosen_upskillingplan"),
         "accepted_plan_role": st.session_state.get("accepted_plan_role"),
         "accepted_at": st.session_state.get("accepted_at"),
-        "progress_tracker": st.session_state.get("progress_tracker", {})
+        "progress_tracker": st.session_state.get("progress_tracker", {}),
+        "manager_feedback": st.session_state.get("manager_feedback")
     })

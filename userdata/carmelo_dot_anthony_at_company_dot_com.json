@@ -1,0 +1,43 @@
+{
+  "chosen_upskillingplan": "## Upskilling Roadmap: CX AI Solutions Engineer\n\n**Weighted Gap Index:** 0.92\n\nThis roadmap prioritizes addressing the significant skills gap to quickly improve performance and build a strong foundation for long-term success.  The timeline assumes 5-6 hours of dedicated learning per week.\n\n**Phase 1: Quick Wins (4 weeks)**\n\n* **(Manager priority) Power BI Advanced Features:**  Improve dashboard depth and advanced features in Power BI.\n    * **Rationale:** Directly addresses manager feedback on Power BI dashboards.\n    * **Course:**  Power BI Advanced Analytics (e.g., a relevant Udemy or LinkedIn Learning course focusing on DAX, advanced visualizations, and interactive dashboards).\n    * **Mini-Project:** Create an interactive dashboard visualizing key metrics from a sample dataset (e.g., customer satisfaction, sales performance), incorporating advanced features like slicers, drill-downs, and custom visuals.\n\n\n* **Python Enhancement (Underdeveloped Skill):** Strengthen existing Python skills to a usable level for data analysis and integration.\n    * **Rationale:**  Building a base in Python is crucial before tackling AI/ML and integration projects.\n    * **Course:** CX104 (if focused on data analysis), Coursera: Python for Everybody (if more general)\n    * **Mini-Project:** Build a simple script to process and analyze a CSV dataset, performing basic calculations and data cleaning.\n\n\n**Phase 2: Core Skills (8 weeks)**\n\n* **Integration (Missing Skill):** Gain foundational knowledge of integration principles and tools.\n    * **Rationale:**  Essential for connecting various systems within a CX solution.\n    * **Course:** CX103\n    * **Mini-Project:**  Develop a simple integration between two systems (e.g., using APIs or ETL tools) to transfer data.  This could use the data from the Python mini-project.\n\n* **AI/ML (Missing Skill):** Learn fundamental AI/ML concepts and techniques relevant to CX.\n    * **Rationale:**  Essential for implementing AI-driven solutions in customer experience.\n    * **Course:** CX102\n    * **Mini-Project:**  Build a simple predictive model (e.g., customer churn prediction) using a relevant dataset.\n\n**Phase 3: Advanced Skills (12 weeks)**\n\n* **SAP C4C (Missing Skill):** Develop proficiency in SAP C4C, a core CX platform.\n    * **Rationale:** Mastery of SAP C4C is crucial for a CX AI Solutions Engineer role.\n    * **Course:** CX101\n    * **Mini-Project:** Develop a custom solution within SAP C4C (e.g., a custom report or workflow automation).  This could leverage the AI/ML model built in Phase 2.\n\n\n**Interdependencies:**\n\n* Phase 2 (Integration) benefits from Phase 1 (Python) as Python is often used in integration tasks.\n* Phase 3 (SAP C4C) can leverage skills gained in Phase 2 (AI/ML and Integration) for developing more advanced solutions within the platform.\n\n**Timeline (weeks):**\n\n* Phase 1: 4 weeks\n* Phase 2: 8 weeks\n* Phase 3: 12 weeks\n\n**Measurable Progress Metrics:**\n\n1. **Power BI Dashboard Score:**  Manager review score (on a scale of 1-5) on the improved Power BI dashboards after Phase 1.\n2. **Integration Project Success Rate:**  Successful completion rate (percentage) of the integration mini-project in Phase 2.\n3. **SAP C4C Certification:**  Achievement of a relevant SAP C4C certification (e.g., a specific module certification) after Phase 3.\n\n\nThis roadmap provides a structured approach to upskilling, prioritizing quick wins to address immediate manager feedback while building a solid foundation for long-term success in the CX AI Solutions Engineer role.  Regular check-ins and adjustments to the plan based on progress and learning pace are recommended.\n",
+  "accepted_plan_role": "CX AI Solutions Engineer",
+  "accepted_at": "2025-09-24T16:08:18.451902",
+  "progress_tracker": {
+    "start_date": "2025-09-25",
+    "weekly_hours": 5,
+    "phase_weeks": {
+      "1": 4,
+      "2": 8,
+      "3": 12
+    },
+    "checkpoints": [],
+    "phase_status": {
+      "1": {
+        "completed": false,
+        "completed_at": null
+      },
+      "2": {
+        "completed": false,
+        "completed_at": null
+      },
+      "3": {
+        "completed": false,
+        "completed_at": null
+      }
+    },
+    "created_at": "2025-09-24T16:07:17.988467"
+  },
+  "manager_feedback": {
+    "text": "You're proactive and collaborate well. However, dashboards in Power BI lack depth and need more advanced features.",
+    "scores": {
+      "neg": 0.102,
+      "neu": 0.578,
+      "pos": 0.32,
+      "compound": 0.5984
+    },
+    "compound": 0.598,
+    "sentiment_label": "Positive",
+    "highlights": null,
+    "analyzed_at": "2025-09-24T16:07:26.060791"
+  }
+}

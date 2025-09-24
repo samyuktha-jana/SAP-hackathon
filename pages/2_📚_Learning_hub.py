@@ -1,32 +1,83 @@
 import os
 import re
 import json
-import random
 import pandas as pd
 from datetime import datetime, date, timedelta
 
 from rapidfuzz import fuzz, process
 import streamlit as st
+try:
+    import importlib
+    _vader_mod = importlib.import_module("vaderSentiment.vaderSentiment")
+    SentimentIntensityAnalyzer = getattr(_vader_mod, "SentimentIntensityAnalyzer", None)
+except Exception:
+    SentimentIntensityAnalyzer = None
 import google.generativeai as genai
 from dotenv import load_dotenv
 
-# --- Import session/auth utils ---
 from utils import notifications_panel
 from utils import hydrate_session_from_json, persist_session_to_json
 
-# --- Session hydration and notifications ---
+# after login check
 hydrate_session_from_json()
+
+
+# ==================================================
+# AUTH / NOTIFICATIONS (top so failures stop early)
+# ==================================================
 if "user" in st.session_state and st.session_state.user:
     notifications_panel(st.session_state.user)
+
+# --------------------------------------------------
+# Page Guard
+# --------------------------------------------------
+# st.set_page_config(page_title="Role Skill Gap Chatbot", layout="wide")
+
 if "user" not in st.session_state or not st.session_state.user:
     st.warning("⚠️ Please login from the Homepage first.")
     st.stop()
 
-
-#st.set_page_config(page_title="Role Skill Gap Chatbot", layout="wide")
+# --------------------------------------------------
+# Title
+# --------------------------------------------------
 st.title("Learning Hub")
 
-# --- Environment & Gemini configuration ---
+# Lightweight UI polish for cards, chips, subtle backgrounds
+def _inject_custom_css():
+    st.markdown(
+        """
+        <style>
+        .lh-card { border: 1px solid #e6e9ef; border-radius: 10px; padding: 14px 16px; background: #ffffffaa; box-shadow: 0 1px 2px rgba(0,0,0,0.03);} 
+        .lh-chip { display:inline-block; padding:4px 10px; margin:4px 6px 0 0; border-radius: 999px; background:#f1f5f9; font-size:12px; color:#334155; border:1px solid #e2e8f0;}
+        .lh-chip-strong { background:#eef2ff; color:#3730a3; border-color:#c7d2fe;}
+        .lh-section { margin-top: 0.75rem; margin-bottom: 0.25rem; font-weight:600; color:#0f172a; }
+        .lh-muted { color:#64748b; font-size: 0.9rem; }
+        .lh-grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap:12px; }
+        .lh-pill { display:inline-flex; align-items:center; gap:6px; padding:4px 10px; border-radius:8px; background:#f8fafc; border:1px solid #e2e8f0; font-size:12px; color:#0f172a;}
+        .lh-divider { height:1px; background:linear-gradient(90deg, #ffffff, #e5e7eb, #ffffff); margin:12px 0; }
+        .lh-small { font-size:12px; color:#64748b; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+_inject_custom_css()
+
+# ==============================
+# QUICK CONFIG FLAGS
+# ==============================
+HIDE_GAP_DISTRIBUTION_CHART = False                # Hide small bar chart in Gap Summary if True
+SHOW_DETAILED_GAP_TABLE_BY_DEFAULT = False         # Gap summary table expander open by default
+SHOW_CHECKPOINT_SECTION = False                    # If False, completely hide the old Checkpoints list UI
+SHOW_CHECKPOINT_FILTERS = False                    # (Only used if SHOW_CHECKPOINT_SECTION=True)
+SHOW_CHECKPOINT_DETAILS = False                    # (Only used if SHOW_CHECKPOINT_SECTION=True)
+SHOW_CHECKPOINT_DATES_INLINE = False               # (Only used if SHOW_CHECKPOINT_SECTION=True)
+PHASE_COMPLETION_CHECKBOXES_ENABLED = True         # Master switch for phase completion controls
+USE_PHASE_COMPLETION_FOR_OVERALL_PROGRESS = True   # If True, overall completion bar is phase-based
+
+# --------------------------------------------------
+# Environment & LLM Config
+# --------------------------------------------------
 load_dotenv()
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
 MODEL_NAME = "gemini-1.5-flash"
@@ -36,19 +87,11 @@ if GOOGLE_API_KEY:
     except Exception as _e:
         st.warning("Could not configure Gemini API (check key).")
 
-# --- Config flags for UI sections ---
-HIDE_GAP_DISTRIBUTION_CHART = False
-SHOW_DETAILED_GAP_TABLE_BY_DEFAULT = False
-SHOW_CHECKPOINT_SECTION = True
-SHOW_CHECKPOINT_FILTERS = False
-SHOW_CHECKPOINT_DETAILS = False
-SHOW_CHECKPOINT_DATES_INLINE = False
-PHASE_COMPLETION_CHECKBOXES_ENABLED = True
-USE_PHASE_COMPLETION_FOR_OVERALL_PROGRESS = True
-
+# --------------------------------------------------
+# Data Loading / Sample Data
+# --------------------------------------------------
 @st.cache_data
 def load_role_skill_data():
-    # Use your full role/skill table here
     data = [
         {"Role": "Data Analyst", "Skill": "SQL", "Required_Level": 4, "Skill_Category": "Data", "Weight": 1.0, "Description": "Advanced SQL for analytics", "Recommended_Courses": "BI101;BI201"},
         {"Role": "Data Analyst", "Skill": "Power BI", "Required_Level": 3, "Skill_Category": "Visualization", "Weight": 0.8, "Description": "Build dashboards & reports", "Recommended_Courses": "BI102"},
@@ -111,7 +154,9 @@ def load_role_skill_data():
     df.columns = [c.strip() for c in df.columns]
     return df
 
-# --- Skill gap and matching utilities ---
+# --------------------------------------------------
+# Utility: Parsing & Matching
+# --------------------------------------------------
 def parse_user_skills(raw_text):
     if not raw_text:
         return {}
@@ -141,7 +186,7 @@ def fuzzy_match_skill(skill, candidate_skills, threshold=85):
         return match, score
     return skill, score
 
-def compute_skill_gap(df_role, user_skills_dict, fuzzy=True, priority_skills=None, priority_weight=2.0):
+def compute_skill_gap(df_role, user_skills_dict, fuzzy=True):
     required_rows = df_role.copy()
     canonical_skills = required_rows["Skill"].tolist()
     normalized_user = {}
@@ -160,9 +205,6 @@ def compute_skill_gap(df_role, user_skills_dict, fuzzy=True, priority_skills=Non
         weight = row.get("Weight", 1.0)
         desc = row.get("Description", "")
         base_courses = row.get("Recommended_Courses", "")
-        # Prioritize feedback skills by increasing weight
-        if priority_skills and req_skill in priority_skills:
-            weight = priority_weight
         user_level = normalized_user.get(req_skill, None)
 
         if user_level is None:
@@ -172,7 +214,7 @@ def compute_skill_gap(df_role, user_skills_dict, fuzzy=True, priority_skills=Non
             })
         else:
             if (req_level is not None and isinstance(req_level, (int, float))
-                and user_level is not None):
+                    and user_level is not None):
                 if user_level >= req_level:
                     gap["met"].append({
                         "skill": req_skill, "required_level": req_level, "user_level": user_level,
@@ -227,7 +269,9 @@ def summarize_gap_stats(gap):
 EXTERNAL_COURSE_INDEX = {
     "Python": ["Coursera: Python for Everybody", "Internal: DS101", "LeetCode practice sets"],
     "SQL": ["Internal: DS102", "Mode Analytics SQL Tutorial", "Coursera: Advanced SQL"],
-    # Add more as needed...
+    "Statistics": ["Internal: DS103", "Khan Academy: Statistics & Probability"],
+    "Machine Learning": ["Internal: DS201", "Andrew Ng ML", "Hands-On ML Book"],
+    "Airflow": ["Astronomer Academy Core", "Internal: DE201"]
 }
 
 def collect_course_suggestions(gap):
@@ -243,7 +287,7 @@ def collect_course_suggestions(gap):
             suggestions[item["skill"]] = accumulate(item["skill"], item.get("base_courses"))
     return suggestions
 
-def build_llm_prompt(role, gap, stats, course_suggestions, priority_skills=None, prioritize_in_phase1=True):
+def build_llm_prompt(role, gap, stats, course_suggestions):
     def fmt_skill_list(items, show_gap=False):
         lines = []
         for it in items:
@@ -263,16 +307,21 @@ def build_llm_prompt(role, gap, stats, course_suggestions, priority_skills=None,
             course_text.append(f"{skill}: {', '.join(courses)}")
     course_block = "\n".join(course_text) if course_text else "No baseline course suggestions found."
 
-    priority_block = ""
-    if priority_skills:
-        priority_block = (
-            "\nManager feedback indicates these skills should be prioritized in the upskilling roadmap:\n"
-            + "\n".join(f"- {s}" for s in priority_skills)
-        )
-        if prioritize_in_phase1:
-            priority_block += "\nPlace these skills in Phase 1 (quick wins) if possible, unless advanced skills are required."
-        else:
-            priority_block += "\nIncrease their importance, but phase assignment is flexible."
+    # Include optional manager feedback context if available in session
+    fb = st.session_state.get("manager_feedback", {})
+    # Always consider feedback if provided, even if not analyzed via the button
+    fb_text = fb.get("text") or st.session_state.get("manager_feedback_input") or ""
+    fb_summary = None
+    if fb_text:
+        fb_summary = f"Manager Feedback Sentiment: {fb.get('sentiment_label','N/A')} (compound {fb.get('compound')})\nHighlights: {fb.get('highlights','') or 'N/A'}\nRaw: {fb_text[:500]}{'...' if len(fb_text)>500 else ''}"
+
+    feedback_block = f"\nManager Feedback Context:\n{fb_summary}\n" if fb_summary else ""
+
+    # Explicit instruction to always incorporate manager feedback into Phase 1 when present
+    manager_phase1_rule = """
+IMPORTANT REQUIREMENT (if Manager Feedback is provided above):
+• Phase 1 must explicitly address the manager feedback items FIRST. For each highlighted item in feedback, include a concrete Phase 1 action (course or mini‑project) that targets it. Make this clear by starting those bullets with "(Manager priority)".
+""" if fb_text else ""
 
     return f"""
 You are a professional upskilling advisor.
@@ -298,7 +347,7 @@ Met Skills:
 Baseline Course Suggestions (raw):
 {course_block}
 
-{priority_block}
+{feedback_block}
 
 TASK:
 1. Produce a prioritized learning roadmap (Phase 1 quick wins, Phase 2 core, Phase 3 advanced).
@@ -306,6 +355,7 @@ TASK:
 3. Suggest timeline (weeks) per phase assuming 5–6 hrs/week.
 4. Highlight interdependencies.
 5. Provide 3 measurable progress metrics.
+{manager_phase1_rule}
 """
 
 def call_gemini(prompt):
@@ -318,36 +368,78 @@ def call_gemini(prompt):
     except Exception as e:
         return f"Error calling Gemini: {e}"
 
-# --- Feedback Section ---
-def generate_fake_feedback(user_name, skills):
-    feedback_templates = [
-        "Great work in {skill}! Shows strong proficiency.",
-        "Needs improvement in {skill}.",
-        "Impressive progress in {skill}.",
-        "Should focus more on {skill}, lacking depth.",
-        "Excellent understanding of {skill}.",
-        "Struggled with {skill}, requires more practice."
-    ]
-    feedback = []
-    for skill in random.sample(skills, min(3, len(skills))):
-        template = random.choice(feedback_templates)
-        feedback.append(template.format(skill=skill))
-    return feedback
+# --------------------------------------------------
+# Gap Summary Renderer
+# --------------------------------------------------
+def render_gap_summary(stats: dict, show_toggle: bool = True):
+    if not stats:
+        st.info("No stats available.")
+        return
+    total = stats["total_required_skills"] or 1
 
-def extract_feedback_sentiment(feedback_list):
-    pos_keywords = ["great", "impressive", "excellent", "strong"]
-    neg_keywords = ["improve", "struggle", "lacking", "needs", "requires", "focus more"]
-    results = []
-    for text in feedback_list:
-        skill_match = [w for w in load_role_skill_data()["Skill"].unique() if w in text]
-        skill = skill_match[0] if skill_match else None
-        sentiment = "positive" if any(k in text.lower() for k in pos_keywords) else (
-            "negative" if any(k in text.lower() for k in neg_keywords) else "neutral"
-        )
-        results.append({"text": text, "skill": skill, "sentiment": sentiment})
-    return results
+    def pct(v):
+        return round(v / total * 100, 1) if total else 0
 
-# --- Progress Tracker Helpers ---
+    gap_index = stats["weighted_gap_index"]
+    readiness = round((1 - gap_index) * 100, 1)
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Met", f"{stats['met']} ({pct(stats['met'])}%)")
+    c2.metric("Underdeveloped", f"{stats['underdeveloped']} ({pct(stats['underdeveloped'])}%)")
+    c3.metric("Missing", f"{stats['missing']} ({pct(stats['missing'])}%)")
+    c4.metric("Extra", stats['extra'])
+    c5.metric("Gap Index", gap_index)
+
+    st.progress(min(int(readiness), 100),
+                text=f"Readiness Score: {readiness}% (Higher is better)")
+
+    if not HIDE_GAP_DISTRIBUTION_CHART:
+        try:
+            import altair as alt
+            dist_df = pd.DataFrame([
+                {"Metric": "Met", "Share": pct(stats["met"])},
+                {"Metric": "Underdeveloped", "Share": pct(stats["underdeveloped"])},
+                {"Metric": "Missing", "Share": pct(stats["missing"])},
+            ])
+            chart = (
+                alt.Chart(dist_df)
+                .mark_bar()
+                .encode(
+                    x=alt.X("Share", title="Share (%)", scale=alt.Scale(domain=[0, 100])),
+                    y=alt.Y("Metric", sort=None),
+                    color=alt.Color(
+                        "Metric",
+                        legend=None,
+                        scale=alt.Scale(
+                            domain=["Met", "Underdeveloped", "Missing"],
+                            range=["#2e7d32", "#f9a825", "#c62828"]
+                        )
+                    ),
+                    tooltip=["Metric", "Share"]
+                )
+                .properties(height=120)
+            )
+            st.altair_chart(chart, use_container_width=True)
+        except Exception:
+            pass
+
+    if show_toggle:
+        with st.expander("Show detailed breakdown table", expanded=SHOW_DETAILED_GAP_TABLE_BY_DEFAULT):
+            readiness_score = readiness
+            rows = [
+                ("Total Required Skills", stats["total_required_skills"], 100.0),
+                ("Met", stats["met"], pct(stats["met"])),
+                ("Underdeveloped", stats["underdeveloped"], pct(stats["underdeveloped"])),
+                ("Missing", stats["missing"], pct(stats["missing"])),
+                ("Extra (Not Required)", stats["extra"], None),
+                ("Weighted Gap Index (0 best, 1 worst)", gap_index, None),
+                ("Readiness Score %", readiness_score, None),
+            ]
+            st.table(pd.DataFrame(rows, columns=["Metric", "Value", "Share (%)"]))
+
+# --------------------------------------------------
+# Progress Tracker Helpers
+# --------------------------------------------------
 PHASE_PATTERN = re.compile(r"(Phase\s+(\d+))[^0-9]*(\b(\d+)\s*weeks?\b)", re.IGNORECASE)
 
 def parse_phase_durations(plan_markdown: str):
@@ -390,7 +482,7 @@ def build_default_checkpoints(phase_weeks: dict, start_date: date):
             "completed_at": None
         })
         if weeks > 2:
-            mid_date = current_start + timedelta(weeks=weeks // 2)
+            mid_date = current_start + timedelta(weeks=weeks / 2)
             checkpoints.append({
                 "id": f"phase{phase_no}_mid",
                 "label": f"{label} Midpoint",
@@ -573,75 +665,141 @@ def render_phase_completion_controls():
     if changed:
         st.rerun()
 
-# --- Tabs ---
+# --------------------------------------------------
+# Tabs
+# --------------------------------------------------
 tabs = st.tabs(["Upskill Analysis & Plan", "Chosen Plan", "Progress Tracker"])
 
-# --- TAB 1: Analysis & Plan ---
+# --------------------------------------------------
+# TAB 1: Analysis & Plan (Option 1 Implementation)
+# --------------------------------------------------
 with tabs[0]:
     with st.expander("Instructions", expanded=False):
         st.markdown("""
         1. Select the target role (table updates immediately).
         2. Enter your current skills (Skill or Skill:Level).
-        3. Optionally review manager feedback and prioritize flagged skills.
-        4. Click Analyze to compute gaps and generate AI plan.
-        5. Accept the plan to enable tracking in Progress Tracker tab.
+        3. Click Analyze to compute gaps and generate AI plan.
+        4. Accept the plan to enable tracking in Progress Tracker tab.
         """)
 
     df = load_role_skill_data()
+    if df is None or "Role" not in df.columns:
+        st.error("Failed to load role skill data.")
+        st.stop()
+
     roles = sorted(df["Role"].dropna().unique().tolist())
+
+    # Reactive Role Selection OUTSIDE form
     selected_role = st.selectbox("Select Role", roles, key="role_select")
-    role_df = df[df["Role"] == selected_role]
+
+    role_df_view = df[df["Role"] == selected_role][["Skill", "Required_Level", "Skill_Category", "Weight"]]
+
     st.caption("Role Requirements (updates immediately when role changes)")
+    # Top chips: total skills and category distribution
+    total_skills = len(role_df_view)
+    cat_counts = role_df_view["Skill_Category"].value_counts(dropna=False).to_dict()
+    chips_html = [f'<span class="lh-chip-strong lh-chip">🎯 Total Skills: {total_skills}</span>']
+    for cat, cnt in cat_counts.items():
+        label = str(cat) if pd.notna(cat) else "Uncategorized"
+        chips_html.append(f'<span class="lh-chip">{label}: {cnt}</span>')
+    st.markdown(" ".join(chips_html), unsafe_allow_html=True)
+
     st.dataframe(
-        role_df[["Skill", "Required_Level", "Skill_Category", "Weight"]],
-        use_container_width=True
+        role_df_view,
+        use_container_width=True,
+        hide_index=True,
     )
 
     st.divider()
 
-    with st.expander("Manager Feedback (Demo)", expanded=True):
-        st.write("This section demonstrates extracting and analyzing manager feedback for skills.")
+    # Manager Feedback Section with Sentiment Analysis
+    st.subheader("Manager Feedback (optional)")
+    st.caption("Paste or write summarized feedback from your manager. We'll analyze sentiment and factor it into the AI plan.")
+    if "_vader" not in st.session_state:
+        try:
+            st.session_state["_vader"] = SentimentIntensityAnalyzer()
+        except Exception:
+            st.session_state["_vader"] = None
 
-        role_skills = role_df["Skill"].tolist()
-        # Persist demo feedback per role to avoid changing on Streamlit reruns
-        # (e.g., when submitting forms or clicking buttons that trigger a rerun).
-        feedback_key = f"feedback_{selected_role}"
-        if feedback_key not in st.session_state:
-            st.session_state[feedback_key] = generate_fake_feedback(
-                st.session_state.get("user", "Employee"), role_skills
+    # Provide quick mock feedback examples
+    mock_cols = st.columns(3)
+    with mock_cols[0]:
+        if st.button("Insert Positive Mock"):
+            st.session_state["manager_feedback_input"] = (
+                "Great progress on Python and SAP BTP tasks. Keep up the pace; your SQL still needs polishing."
             )
-        feedback_samples = st.session_state[feedback_key]
+    with mock_cols[1]:
+        if st.button("Insert Mixed Mock"):
+            st.session_state["manager_feedback_input"] = (
+                "You're proactive and collaborate well. However, dashboards in Power BI lack depth and need more advanced features."
+            )
+    with mock_cols[2]:
+        if st.button("Insert Negative Mock"):
+            st.session_state["manager_feedback_input"] = (
+                "Delivery has been inconsistent and the last integration had multiple defects. SQL and API design must improve quickly."
+            )
 
-        st.write("Sample Feedback:")
-        for fb in feedback_samples:
-            st.write(f"- {fb}")
-
-        analyzed_feedback = extract_feedback_sentiment(feedback_samples)
-        fb_df = pd.DataFrame(analyzed_feedback)
-
-        st.write("Feedback Analysis:")
-        st.dataframe(fb_df, use_container_width=True)
-
-        pos_skills = fb_df[fb_df["sentiment"] == "positive"]["skill"].dropna().tolist()
-        neg_skills = fb_df[fb_df["sentiment"] == "negative"]["skill"].dropna().unique().tolist()
-
-        st.markdown(f"**Positive Feedback Skills:** {', '.join(pos_skills) if pos_skills else 'None'}")
-        st.markdown(f"**Negative Feedback Skills:** {', '.join(neg_skills) if neg_skills else 'None'}")
-
-        st.session_state["priority_skills_from_feedback"] = neg_skills
-
-        st.info("Skills flagged in negative feedback will be prioritized in your learning roadmap.")
-
-    st.subheader("Customize Prioritization Strength for Feedback-flagged Skills")
-    prioritize_in_phase1 = st.checkbox(
-        "Always place feedback-flagged skills in Phase 1 (quick wins)?",
-        value=True
-    )
-    priority_weight = st.slider(
-        "Increase weight for feedback-flagged skills (higher means more urgent in skill gap calculation):",
-        min_value=1.0, max_value=5.0, value=2.0, step=0.1
+    fb_text = st.text_area(
+        "Manager Feedback",
+        key="manager_feedback_input",
+        height=100,
+        placeholder="E.g., Strong collaboration and Python skills, but needs improvement in SQL and Power BI visuals...",
     )
 
+    fb_analyzed = False
+    if st.button("Analyze Feedback Sentiment"):
+        if not fb_text:
+            st.warning("Please enter feedback text first.")
+        elif st.session_state.get("_vader") is None:
+            st.error("Sentiment analyzer not available. Install vaderSentiment and reload.")
+        else:
+            scores = st.session_state["_vader"].polarity_scores(fb_text)
+            comp = round(scores.get("compound", 0.0), 3)
+            if comp >= 0.05:
+                label = "Positive"
+            elif comp <= -0.05:
+                label = "Negative"
+            else:
+                label = "Neutral"
+            # simple heuristic highlights: extract skill words present in role_df_view
+            skills = set(role_df_view["Skill"].tolist())
+            found = [s for s in skills if re.search(rf"\b{re.escape(s)}\b", fb_text, re.IGNORECASE)]
+            st.session_state["manager_feedback"] = {
+                "text": fb_text,
+                "scores": scores,
+                "compound": comp,
+                "sentiment_label": label,
+                "highlights": ", ".join(found) if found else None,
+                "analyzed_at": datetime.utcnow().isoformat(),
+            }
+            fb_analyzed = True
+
+    # Show current feedback summary if present
+    cur_fb = st.session_state.get("manager_feedback")
+    if cur_fb:
+        st.markdown(
+            f"""
+            <div class="lh-card">
+                <div class="lh-section">Current Feedback Snapshot</div>
+                <div class="lh-small lh-muted">Sentiment: <b>{cur_fb.get('sentiment_label')}</b> (compound {cur_fb.get('compound')})</div>
+                <div class="lh-small">Highlights: {cur_fb.get('highlights') or '—'}</div>
+                <details style="margin-top:6px;"><summary class="lh-small">Show full text</summary>
+                <pre style="white-space:pre-wrap">{cur_fb.get('text')}</pre>
+                </details>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        cfb1, cfb2 = st.columns(2)
+        with cfb1:
+            if st.button("Clear Feedback"):
+                st.session_state.pop("manager_feedback", None)
+                st.session_state.pop("manager_feedback_input", None)
+                st.rerun()
+        with cfb2:
+            st.caption("This feedback will be considered when generating the plan.")
+
+    # Form for skill input + analyze action
     with st.form("analysis_form", clear_on_submit=False):
         user_skill_input = st.text_area(
             "Your Current Skills",
@@ -650,77 +808,101 @@ with tabs[0]:
         )
         submitted = st.form_submit_button("Analyze Skill Gap & Generate Plan")
 
+    # If role changed after last plan generation, optionally inform user
+    if st.session_state.get("latest_role") and st.session_state["latest_role"] != selected_role:
+        st.info("Role changed since last generated plan. Run analysis again to refresh gap & plan.")
+
     if submitted:
         user_skills_dict = parse_user_skills(user_skill_input)
-        priority_skills = st.session_state.get("priority_skills_from_feedback", [])
+        role_df = df[df["Role"] == selected_role]
 
-        gap = compute_skill_gap(
-            role_df,
-            user_skills_dict,
-            fuzzy=True,
-            priority_skills=priority_skills,
-            priority_weight=priority_weight
-        )
+        if role_df.empty:
+            st.error("No data for that role.")
+        else:
+            gap = compute_skill_gap(role_df, user_skills_dict)
+            stats = summarize_gap_stats(gap)
+            course_suggestions = collect_course_suggestions(gap)
 
-        stats = summarize_gap_stats(gap)
-        course_suggestions = collect_course_suggestions(gap)
+            st.session_state["latest_gap"] = gap
+            st.session_state["latest_stats"] = stats
+            st.session_state["latest_course_suggestions"] = course_suggestions
+            st.session_state["latest_role"] = selected_role
 
-        st.session_state["latest_gap"] = gap
-        st.session_state["latest_stats"] = stats
-        st.session_state["latest_course_suggestions"] = course_suggestions
-        st.session_state["latest_role"] = selected_role
+            st.subheader("Gap Summary")
+            render_gap_summary(stats)
 
-        st.subheader("Gap Summary")
-        st.write(stats)
+            gap_tabs = st.tabs(["Missing", "Underdeveloped", "Met", "Extra"])
+            with gap_tabs[0]:
+                if gap["missing"]:
+                    st.dataframe(pd.DataFrame(gap["missing"]), use_container_width=True, hide_index=True)
+                else:
+                    st.success("No missing skills.")
+            with gap_tabs[1]:
+                if gap["underdeveloped"]:
+                    st.dataframe(pd.DataFrame(gap["underdeveloped"]), use_container_width=True, hide_index=True)
+                else:
+                    st.success("No underdeveloped skills.")
+            with gap_tabs[2]:
+                if gap["met"]:
+                    st.dataframe(pd.DataFrame(gap["met"]), use_container_width=True, hide_index=True)
+                else:
+                    st.info("None met yet.")
+            with gap_tabs[3]:
+                if gap["extra"]:
+                    st.dataframe(pd.DataFrame(gap["extra"]), use_container_width=True, hide_index=True)
+                else:
+                    st.info("No extra skills.")
 
-        gap_tabs = st.tabs(["Missing", "Underdeveloped", "Met", "Extra"])
-        with gap_tabs[0]:
-            st.write(pd.DataFrame(gap["missing"]) if gap["missing"] else "No missing skills.")
-        with gap_tabs[1]:
-            st.write(pd.DataFrame(gap["underdeveloped"]) if gap["underdeveloped"] else "No underdeveloped skills.")
-        with gap_tabs[2]:
-            st.write(pd.DataFrame(gap["met"]) if gap["met"] else "None met yet.")
-        with gap_tabs[3]:
-            st.write(pd.DataFrame(gap["extra"]) if gap["extra"] else "No extra skills.")
+            st.subheader("Course Suggestions")
+            if course_suggestions:
+                # Render as responsive cards
+                cols = st.columns(2)
+                idx = 0
+                for skill, courses in course_suggestions.items():
+                    with cols[idx % 2]:
+                        st.markdown(
+                            f"""
+                            <div class="lh-card">
+                                <div class="lh-section">{skill}</div>
+                                <div class="lh-small lh-muted">Recommended</div>
+                                <div style="margin-top:6px;">
+                                    {' '.join(f'<span class="lh-pill">📘 {c}</span>' for c in courses)}
+                                </div>
+                            </div>
+                            """,
+                            unsafe_allow_html=True,
+                        )
+                    idx += 1
+            else:
+                st.write("None available.")
 
-        st.subheader("Course Suggestions")
-        for skill, courses in course_suggestions.items():
-            st.markdown(f"**{skill}:** {', '.join(courses)}")
+            st.divider()
+            st.subheader("Gemini Learning Plan")
+            with st.spinner("Generating plan..."):
+                prompt = build_llm_prompt(selected_role, gap, stats, course_suggestions)
+                llm_output = call_gemini(prompt)
 
-        st.divider()
-        st.subheader("Gemini Learning Plan")
-        with st.spinner("Generating plan..."):
-            prompt = build_llm_prompt(
-                selected_role,
-                gap,
-                stats,
-                course_suggestions,
-                priority_skills=priority_skills,
-                prioritize_in_phase1=prioritize_in_phase1
-            )
-            llm_output = call_gemini(prompt)
+            st.session_state["latest_prompt"] = prompt
+            st.session_state["latest_plan"] = llm_output
 
-        st.session_state["latest_prompt"] = prompt
-        st.session_state["latest_plan"] = llm_output
+            # IMPORTANT: Render plan as-is to preserve exact format
+            st.markdown(llm_output)
+            with st.expander("Prompt Debug"):
+                st.code(prompt, language="markdown")
 
-        st.markdown(llm_output)
-        with st.expander("Prompt Debug"):
-            st.code(prompt, language="markdown")
-
+    # Post-generation action buttons
     if st.session_state.get("latest_plan"):
         st.divider()
         c1, c2, c3 = st.columns([1, 1, 2])
         with c1:
-            if st.button("Regenerate Plan"):
+            if st.button("🔁 Regenerate Plan"):
                 if all(k in st.session_state for k in ["latest_gap", "latest_stats", "latest_course_suggestions", "latest_role"]):
                     with st.spinner("Regenerating..."):
                         new_prompt = build_llm_prompt(
                             st.session_state["latest_role"],
                             st.session_state["latest_gap"],
                             st.session_state["latest_stats"],
-                            st.session_state["latest_course_suggestions"],
-                            priority_skills=st.session_state.get("priority_skills_from_feedback", []),
-                            prioritize_in_phase1=prioritize_in_phase1
+                            st.session_state["latest_course_suggestions"]
                         )
                         new_plan = call_gemini(new_prompt)
                     st.session_state["latest_prompt"] = new_prompt
@@ -729,13 +911,13 @@ with tabs[0]:
                 else:
                     st.warning("Missing context to regenerate.")
         with c2:
-            if st.button("Accept Plan"):
+            if st.button("✅ Accept Plan"):
                 st.session_state["chosen_upskillingplan"] = st.session_state["latest_plan"]
                 st.session_state["accepted_plan_role"] = st.session_state.get("latest_role")
                 st.session_state["accepted_at"] = datetime.utcnow().isoformat()
                 st.success("Plan accepted. Track it in the Progress Tracker tab.")
         with c3:
-            if st.button("Clear Generated Plan"):
+            if st.button("🧹 Clear Generated Plan"):
                 for key in [
                     "latest_gap", "latest_stats", "latest_course_suggestions",
                     "latest_role", "latest_prompt", "latest_plan"
@@ -744,21 +926,29 @@ with tabs[0]:
                 st.info("Cleared.")
                 st.rerun()
 
-# --- TAB 2: Chosen Plan ---
+# --------------------------------------------------
+# TAB 2: Chosen Plan
+# --------------------------------------------------
 with tabs[1]:
     st.header("Your Accepted Plan")
     chosen_plan = st.session_state.get("chosen_upskillingplan")
     if chosen_plan:
         st.markdown(f"**Role:** {st.session_state.get('accepted_plan_role','N/A')}")
         st.markdown(f"**Accepted (UTC):** {st.session_state.get('accepted_at','N/A')}")
+        cur_fb = st.session_state.get("manager_feedback")
+        if cur_fb:
+            st.info(f"Manager Feedback: {cur_fb.get('sentiment_label')} (compound {cur_fb.get('compound')}). Highlights: {cur_fb.get('highlights') or '—'}")
         st.divider()
         st.markdown(chosen_plan)
     else:
         st.info("No plan accepted yet.")
 
-# --- TAB 3: Progress Tracker ---
+# --------------------------------------------------
+# TAB 3: Progress Tracker
+# --------------------------------------------------
 with tabs[2]:
     st.header("📈 Progress Tracker")
+
     init_progress_state()
     pt = st.session_state["progress_tracker"]
 
@@ -776,8 +966,12 @@ with tabs[2]:
     phase_pct_val_simple = compute_phase_completion_pct()
     phase_pct_val_weighted = compute_weighted_phase_completion()
 
-    overall_label = "Phase Completion" if USE_PHASE_COMPLETION_FOR_OVERALL_PROGRESS else "Checkpoint Completion"
-    overall_pct = phase_pct_val_weighted if USE_PHASE_COMPLETION_FOR_OVERALL_PROGRESS else metrics["overall_pct"]
+    if USE_PHASE_COMPLETION_FOR_OVERALL_PROGRESS:
+        overall_label = "Phase Completion"
+        overall_pct = phase_pct_val_weighted
+    else:
+        overall_label = "Checkpoint Completion"
+        overall_pct = metrics["overall_pct"]
 
     m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric(overall_label, f"{overall_pct:.1f}%")
@@ -786,10 +980,26 @@ with tabs[2]:
     m4.metric("Weeks Elapsed", f"{elapsed_weeks}")
     m5.metric("Planned Weeks", f"{total_weeks}")
 
+    # Surface feedback sentiment as context
+    cur_fb = st.session_state.get("manager_feedback")
+    if cur_fb:
+        st.caption(f"Manager Feedback sentiment: {cur_fb.get('sentiment_label')} (compound {cur_fb.get('compound')}).")
+
     st.progress(min(int(overall_pct), 100))
 
     if PHASE_COMPLETION_CHECKBOXES_ENABLED:
         render_phase_completion_controls()
+
+    if metrics["phase_pct"] and SHOW_CHECKPOINT_SECTION:
+        with st.expander("Phase Progress (Checkpoint-Based)", expanded=False):
+            phase_bar_cols = st.columns(len(metrics["phase_pct"]))
+            for i, (p, pct) in enumerate(sorted(metrics["phase_pct"].items())):
+                with phase_bar_cols[i]:
+                    st.write(f"Phase {p}")
+                    st.progress(min(int(pct), 100))
+                    if st.button(f"Mark Phase {p} Complete", key=f"markphase_{p}"):
+                        mark_phase_complete(p)
+                        st.rerun()
 
     if SHOW_CHECKPOINT_SECTION:
         st.markdown("### Checkpoints")
@@ -812,7 +1022,7 @@ with tabs[2]:
                 if SHOW_CHECKPOINT_DETAILS:
                     st.caption(f"Target: {c.get('target_date') or '—'} | Done: {c.get('completed_at') or '—'}")
 
-        if st.button("Rebuild Default Checkpoints (Overwrite)"):
+        if st.button("Rebuild Default Checkpoints (Overwrite)", key="rebuild_cp_overwrite_top"):
             rebuild_checkpoints(force=True)
             st.success("Default checkpoints rebuilt.")
             st.rerun()
@@ -852,16 +1062,17 @@ with tabs[2]:
                 st.session_state.pop("progress_tracker", None)
                 st.success("Progress tracker reset.")
                 st.rerun()
-        with cols_dbg[1]:
-            if st.button("Clear All Checkpoints"):
-                pt["checkpoints"] = []
-                st.warning("Checkpoints cleared.")
-                st.rerun()
-        with cols_dbg[2]:
-            if st.button("Rebuild Checkpoints (Force)"):
-                rebuild_checkpoints(force=True)
-                st.success("Rebuilt.")
-                st.rerun()
+        if SHOW_CHECKPOINT_SECTION:
+            with cols_dbg[1]:
+                if st.button("Clear All Checkpoints"):
+                    pt["checkpoints"] = []
+                    st.warning("Checkpoints cleared.")
+                    st.rerun()
+            with cols_dbg[2]:
+                if st.button("Rebuild Checkpoints (Force)"):
+                    rebuild_checkpoints(force=True)
+                    st.success("Rebuilt.")
+                    st.rerun()
 
     with st.expander("Setup (Start Date, Hours, Parse Phases)", expanded=False):
         setup_cols = st.columns([1, 1, 1])
@@ -885,7 +1096,7 @@ with tabs[2]:
                     st.success(f"Parsed phases: {parsed}")
                 else:
                     st.warning("Could not detect numeric phase durations in plan.")
-        if pt["start_date"] and pt["phase_weeks"] and not pt["checkpoints"]:
+        if pt["start_date"] and pt["phase_weeks"] and SHOW_CHECKPOINT_SECTION and not pt["checkpoints"]:
             if st.button("Generate Default Checkpoints"):
                 rebuild_checkpoints(force=True)
                 st.success("Default checkpoints created.")
@@ -911,9 +1122,11 @@ with tabs[2]:
                 ensure_phase_status()
                 st.success("Phase durations updated.")
 
-            if st.button("Rebuild Default Checkpoints (Overwrite)"):
+        if pt["phase_weeks"] and SHOW_CHECKPOINT_SECTION:
+            if st.button("Rebuild Default Checkpoints (Overwrite)", key="rebuild_cp_overwrite_bottom"):
                 rebuild_checkpoints(force=True)
                 st.success("Default checkpoints rebuilt.")
                 st.rerun()
+
 
 persist_session_to_json()
