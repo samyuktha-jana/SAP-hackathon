@@ -18,6 +18,75 @@ from dotenv import load_dotenv
 
 from utils import notifications_panel
 from utils import hydrate_session_from_json, persist_session_to_json
+import sqlite3
+
+
+
+# --------------------------------------------------
+# Takeaways loader
+# --------------------------------------------------
+def load_latest_takeaway(user_email):
+    conn = None
+    try:
+        conn = sqlite3.connect("mentormatch.db")
+        cur = conn.cursor()
+        # Check whether the feedback table exists. If not, treat as no takeaways.
+        cur.execute("""
+            SELECT name FROM sqlite_master WHERE type='table' AND name='feedback'
+        """)
+        if not cur.fetchone():
+            return None
+
+        cur.execute("""
+            SELECT takeaway 
+            FROM feedback 
+            WHERE user_email=? 
+            ORDER BY id DESC LIMIT 1
+        """, (user_email,))
+        row = cur.fetchone()
+        return row[0] if row else None
+    except sqlite3.OperationalError:
+        # Any operational error (including missing DB) should be treated as no takeaways.
+        return None
+    finally:
+        if conn:
+            conn.close()
+
+
+def fuzzy_match_skill(skill, candidate_skills, threshold=80):
+    if not candidate_skills:
+        return skill, 0
+    match, score, _ = process.extractOne(skill, candidate_skills, scorer=fuzz.WRatio)
+    if score >= threshold:
+        return match, score
+    return None, score
+
+def detect_skills_from_takeaways(takeaways, all_skills):
+    detected = []
+    for text in takeaways:
+        lower_text = text.lower()
+        for skill in all_skills:
+            if skill.lower() in lower_text and skill not in detected:
+                detected.append(skill)
+    return detected
+
+
+def recommend_courses_from_takeaways(takeaways, df):
+    all_skills = df["Skill"].unique().tolist()
+    detected = detect_skills_from_takeaways(takeaways, all_skills)
+    recs = {}
+    for skill in detected:
+        courses = []
+        base = df[df["Skill"] == skill]["Recommended_Courses"].tolist()
+        if base:
+            for b in base[0].split(";"):
+                courses.append(b.strip())
+        external = EXTERNAL_COURSE_INDEX.get(skill, [])
+        courses.extend(external)
+        recs[skill] = list(dict.fromkeys(courses))
+    return recs
+
+
 
 # after login check
 hydrate_session_from_json()
@@ -298,7 +367,7 @@ def collect_course_suggestions(gap):
             suggestions[item["skill"]] = accumulate(item["skill"], item.get("base_courses"))
     return suggestions
 
-def build_llm_prompt(role, gap, stats, course_suggestions):
+def build_llm_prompt(role, gap, stats, course_suggestions,takeaway_text=None):
     def fmt_skill_list(items, show_gap=False):
         lines = []
         for it in items:
@@ -318,21 +387,31 @@ def build_llm_prompt(role, gap, stats, course_suggestions):
             course_text.append(f"{skill}: {', '.join(courses)}")
     course_block = "\n".join(course_text) if course_text else "No baseline course suggestions found."
 
-    # Include optional manager feedback context if available in session
+    # Include optional manager feedback context only if the user enabled it
     fb = st.session_state.get("manager_feedback", {})
-    # Always consider feedback if provided, even if not analyzed via the button
+    # Always allow feedback text to exist in session, but only include in prompt when explicitly enabled
     fb_text = fb.get("text") or st.session_state.get("manager_feedback_input") or ""
     fb_summary = None
     if fb_text:
         fb_summary = f"Manager Feedback Sentiment: {fb.get('sentiment_label','N/A')} (compound {fb.get('compound')})\nHighlights: {fb.get('highlights','') or 'N/A'}\nRaw: {fb_text[:500]}{'...' if len(fb_text)>500 else ''}"
 
-    feedback_block = f"\nManager Feedback Context:\n{fb_summary}\n" if fb_summary else ""
+    include_fb = bool(st.session_state.get("include_manager_feedback", False))
+    feedback_block = f"\nManager Feedback Context:\n{fb_summary}\n" if (fb_summary and include_fb) else ""
 
-    # Explicit instruction to always incorporate manager feedback into Phase 1 when present
+    # Explicit instruction to always incorporate manager feedback into Phase 1 when present AND enabled
     manager_phase1_rule = """
 IMPORTANT REQUIREMENT (if Manager Feedback is provided above):
 • Phase 1 must explicitly address the manager feedback items FIRST. For each highlighted item in feedback, include a concrete Phase 1 action (course or mini‑project) that targets it. Make this clear by starting those bullets with "(Manager priority)".
-""" if fb_text else ""
+""" if (fb_text and include_fb) else ""
+
+    takeaway_rule = (
+    "CRITICAL RULE: Do NOT create a separate 'Takeaway' section anywhere. "
+    "Instead, incorporate the employee takeaway context directly into Phase 1 actions "
+    "(for example, by marking a Phase 1 action as '(Employee takeaway)')."
+    if takeaway_text
+    else ""
+    )
+
 
     return f"""
 You are a professional upskilling advisor.
@@ -360,6 +439,7 @@ Baseline Course Suggestions (raw):
 
 {feedback_block}
 
+
 TASK:
 1. Produce a prioritized learning roadmap (Phase 1 quick wins, Phase 2 core, Phase 3 advanced).
 2. For each skill in phases: rationale (1 sentence), 1–2 courses, mini practice project.
@@ -367,6 +447,7 @@ TASK:
 4. Highlight interdependencies.
 5. Provide 3 measurable progress metrics.
 {manager_phase1_rule}
+{takeaway_rule}
 """
 
 def call_gemini(prompt):
@@ -448,43 +529,7 @@ def render_gap_summary(stats: dict, show_toggle: bool = True):
             ]
             st.table(pd.DataFrame(rows, columns=["Metric", "Value", "Share (%)"]))
 
-# --------------------------------------------------
-# Visualization helpers for Tab 1 (Plotly-based)
-# --------------------------------------------------
-def _role_overview_charts(role_df_view: pd.DataFrame):
-    """Return (pie, bar) figures summarizing role requirements."""
-    try:
-        # Category distribution (donut)
-        cat_counts = (
-            role_df_view["Skill_Category"].fillna("Uncategorized").value_counts().reset_index()
-        )
-        cat_counts.columns = ["Skill_Category", "Count"]
-        pie = px.pie(
-            cat_counts,
-            values="Count",
-            names="Skill_Category",
-            hole=0.45,
-            title="Skill Categories",
-            color_discrete_sequence=px.colors.qualitative.Set3,
-        )
-        pie.update_traces(textposition="inside", textinfo="percent+label")
-
-        # Required level per skill (horizontal bar)
-        bar_df = role_df_view.copy()
-        bar_df["Skill"] = bar_df["Skill"].astype(str)
-        bar = px.bar(
-            bar_df.sort_values("Required_Level", ascending=True),
-            x="Required_Level",
-            y="Skill",
-            color="Skill_Category",
-            orientation="h",
-            title="Required Level by Skill",
-            color_discrete_sequence=px.colors.qualitative.Set2,
-        )
-        bar.update_layout(yaxis_title="", xaxis_title="Level")
-        return pie, bar
-    except Exception:
-        return None, None
+# (Removed unused visual overview helper)
 
 def _build_gap_dataframe(gap: dict, role_df_view: pd.DataFrame) -> pd.DataFrame:
     """Flatten gap dict to a dataframe suitable for charts."""
@@ -621,11 +666,10 @@ def split_plan_into_sections(plan_text: str):
         return []
     sections = []
     current = {"title": "Overview", "phase_no": None, "lines": []}
+    phase_re = re.compile(r"^\s{0,3}(?:#+\s*)?(Phase\s+(\d+)[^\n:]*)\:?(.*)$", re.IGNORECASE)
     for raw_line in plan_text.splitlines():
-        if re.search(r"^(?:\*\*)?\s*Phase\s+(\d+)", raw_line, re.IGNORECASE):
-            m = re.search(r"^(?:\*\*)?\s*Phase\s+(\d+)", raw_line, re.IGNORECASE)
-            phase_no = int(m.group(1))
-            title = raw_line.strip()
+        m = phase_re.match(raw_line)
+        if m:
             # flush previous
             if current["lines"]:
                 sections.append({
@@ -633,7 +677,14 @@ def split_plan_into_sections(plan_text: str):
                     "phase_no": current["phase_no"],
                     "body": "\n".join(current["lines"]).strip()
                 })
-            current = {"title": title, "phase_no": phase_no, "lines": []}
+            title = m.group(1).strip().rstrip(":")
+            pno = None
+            try:
+                pno = int(m.group(2))
+            except Exception:
+                pno = None
+            rest = (m.group(3) or "").strip()
+            current = {"title": title, "phase_no": pno, "lines": ([rest] if rest else [])}
         else:
             current["lines"].append(raw_line)
     if current["lines"]:
@@ -654,78 +705,14 @@ def extract_bullets(markdown_text: str, max_items: int = 6):
         line = raw.strip()
         if not line:
             continue
-        if re.match(r"^(?:[-*•]|\*\*)\s+", line):
-            items.append(re.sub(r"^(?:[-*•]|\*\*)\s+", "", line))
+        if re.match(r"^[-*•]\s+", line):
+            items.append(re.sub(r"^[-*•]\s+", "", line))
         elif re.match(r"^\d+\.[\)\s]", line):
             items.append(re.sub(r"^\d+\.[\)\s]", "", line))
         # Stop once enough items gathered to keep display compact
         if len(items) >= max_items:
             break
     return items
-
-def extract_courses(markdown_text: str):
-    courses = []
-    for line in markdown_text.splitlines():
-        line = line.strip()
-        if "Courses:" in line:
-            # Parse the courses after "Courses:"
-            course_part = line.split("Courses:", 1)[-1].strip()
-            # Split by comma
-            course_list = [c.strip() for c in course_part.split(",")]
-            for c in course_list:
-                if "Coursera:" in c:
-                    course = c.split("Coursera:", 1)[-1].strip()
-                    courses.append(f"{course} (Coursera)")
-                elif "Internal:" in c:
-                    course = c.split("Internal:", 1)[-1].strip()
-                    courses.append(f"{course} (Internal)")
-                elif "Udemy:" in c:
-                    course = c.split("Udemy:", 1)[-1].strip()
-                    courses.append(f"{course} (Udemy)")
-                elif "Khan Academy:" in c:
-                    course = c.split("Khan Academy:", 1)[-1].strip()
-                    courses.append(f"{course} (Khan Academy)")
-                elif "Mode Analytics:" in c:
-                    course = c.split("Mode Analytics:", 1)[-1].strip()
-                    courses.append(f"{course} (Mode Analytics)")
-                elif "Astronomer Academy:" in c:
-                    course = c.split("Astronomer Academy:", 1)[-1].strip()
-                    courses.append(f"{course} (Astronomer Academy)")
-                elif "Andrew Ng" in c:
-                    courses.append("Machine Learning (Andrew Ng)")
-                elif "Hands-On ML" in c:
-                    courses.append("Hands-On Machine Learning (Book/O'Reilly)")
-                elif "LeetCode" in c:
-                    courses.append("LeetCode Practice (LeetCode)")
-                else:
-                    courses.append(c)
-        elif any(platform in line for platform in ["Coursera:", "Internal:", "Udemy:", "Khan Academy:", "Mode Analytics:", "Astronomer Academy:", "Andrew Ng", "Hands-On ML", "LeetCode"]):
-            # Fallback for other formats
-            if "Coursera:" in line:
-                course = line.split("Coursera:", 1)[-1].strip()
-                courses.append(f"{course} (Coursera)")
-            elif "Internal:" in line:
-                course = line.split("Internal:", 1)[-1].strip()
-                courses.append(f"{course} (Internal)")
-            elif "Udemy:" in line:
-                course = line.split("Udemy:", 1)[-1].strip()
-                courses.append(f"{course} (Udemy)")
-            elif "Khan Academy:" in line:
-                course = line.split("Khan Academy:", 1)[-1].strip()
-                courses.append(f"{course} (Khan Academy)")
-            elif "Mode Analytics:" in line:
-                course = line.split("Mode Analytics:", 1)[-1].strip()
-                courses.append(f"{course} (Mode Analytics)")
-            elif "Astronomer Academy:" in line:
-                course = line.split("Astronomer Academy:", 1)[-1].strip()
-                courses.append(f"{course} (Astronomer Academy)")
-            elif "Andrew Ng" in line:
-                courses.append("Machine Learning (Andrew Ng)")
-            elif "Hands-On ML" in line:
-                courses.append("Hands-On Machine Learning (Book/O'Reilly)")
-            elif "LeetCode" in line:
-                courses.append("LeetCode Practice (LeetCode)")
-    return list(set(courses))
 
 def init_progress_state():
     if "progress_tracker" not in st.session_state:
@@ -975,7 +962,7 @@ with tabs[0]:
     # Reactive Role Selection OUTSIDE form
     selected_role = st.selectbox("Select Role", roles, key="role_select")
 
-    role_df_view = df[df["Role"] == selected_role][["Skill", "Required_Level", "Skill_Category", "Weight"]]
+    role_df_view = df[df["Role"] == selected_role][["Skill", "Required_Level", "Skill_Category"]]
 
     st.caption("Role Requirements (updates immediately when role changes)")
     # Top chips: total skills and category distribution
@@ -989,127 +976,7 @@ with tabs[0]:
 
     st.dataframe(role_df_view, use_container_width=True, hide_index=True)
 
-    # Visual overview for quick scanning (only Tab 1)
-    with st.expander("Visual Overview", expanded=False):
-        st.caption("Category distribution and required levels per skill for the selected role.")
-        ov1, ov2 = st.columns(2)
-        pie, bar = _role_overview_charts(role_df_view)
-        with ov1:
-            if pie is not None:
-                st.plotly_chart(pie, use_container_width=True)
-        with ov2:
-            if bar is not None:
-                st.plotly_chart(bar, use_container_width=True)
-
-    st.divider()
-
-    # Manager Feedback Section with Sentiment Analysis
-    st.subheader("Manager Feedback (optional)")
-    st.caption("Paste or write summarized feedback from your manager. We'll analyze sentiment and factor it into the AI plan.")
-    if "_vader" not in st.session_state:
-        try:
-            st.session_state["_vader"] = SentimentIntensityAnalyzer()
-        except Exception:
-            st.session_state["_vader"] = None
-
-    # Provide quick mock feedback examples
-    mock_cols = st.columns(3)
-    with mock_cols[0]:
-        if st.button("Insert Positive Mock"):
-            st.session_state["manager_feedback_input"] = (
-                "Great progress on Python and SAP BTP tasks. Keep up the pace; your SQL still needs polishing."
-            )
-    with mock_cols[1]:
-        if st.button("Insert Mixed Mock"):
-            st.session_state["manager_feedback_input"] = (
-                "You're proactive and collaborate well. However, dashboards in Power BI lack depth and need more advanced features."
-            )
-    with mock_cols[2]:
-        if st.button("Insert Negative Mock"):
-            st.session_state["manager_feedback_input"] = (
-                "Delivery has been inconsistent and the last integration had multiple defects. SQL and API design must improve quickly."
-            )
-
-    fb_text = st.text_area(
-        "Manager Feedback",
-        key="manager_feedback_input",
-        height=100,
-        placeholder="E.g., Strong collaboration and Python skills, but needs improvement in SQL and Power BI visuals...",
-    )
-
-    fb_analyzed = False
-    if st.button("Analyze Feedback Sentiment"):
-        if not fb_text:
-            st.warning("Please enter feedback text first.")
-        elif st.session_state.get("_vader") is None:
-            st.error("Sentiment analyzer not available. Install vaderSentiment and reload.")
-        else:
-            scores = st.session_state["_vader"].polarity_scores(fb_text)
-            comp = round(scores.get("compound", 0.0), 3)
-            if comp >= 0.05:
-                label = "Positive"
-            elif comp <= -0.05:
-                label = "Negative"
-            else:
-                label = "Neutral"
-            # simple heuristic highlights: extract skill words present in role_df_view
-            skills = set(role_df_view["Skill"].tolist())
-            found = [s for s in skills if re.search(rf"\b{re.escape(s)}\b", fb_text, re.IGNORECASE)]
-            st.session_state["manager_feedback"] = {
-                "text": fb_text,
-                "scores": scores,
-                "compound": comp,
-                "sentiment_label": label,
-                "highlights": ", ".join(found) if found else None,
-                "analyzed_at": datetime.utcnow().isoformat(),
-            }
-            fb_analyzed = True
-
-    # Show only Positive vs Negative comparison if present
-    cur_fb = st.session_state.get("manager_feedback")
-    if cur_fb:
-        # Positive vs Negative comparison (metrics + mini chart)
-        scores = cur_fb.get("scores") or {}
-        try:
-            pos_pct = round(float(scores.get("pos", 0.0)) * 100, 1)
-            neg_pct = round(float(scores.get("neg", 0.0)) * 100, 1)
-            comp_cols = st.columns(2)
-            with comp_cols[0]:
-                st.metric("Positive", f"{pos_pct}%")
-            with comp_cols[1]:
-                st.metric("Negative", f"{neg_pct}%")
-            df_comp = pd.DataFrame([
-                {"Sentiment": "Positive", "Percent": pos_pct},
-                {"Sentiment": "Negative", "Percent": neg_pct},
-            ])
-            fig_comp = px.bar(
-                df_comp,
-                x="Sentiment",
-                y="Percent",
-                color="Sentiment",
-                color_discrete_map={"Positive": "#10b981", "Negative": "#ef4444"},
-                title="Positive vs Negative",
-            )
-            fig_comp.update_layout(
-                height=220,
-                yaxis_title="%",
-                xaxis_title="",
-                showlegend=False,
-                margin=dict(l=10, r=10, t=40, b=10),
-                yaxis=dict(range=[0, 100])
-            )
-            st.plotly_chart(fig_comp, use_container_width=True)
-        except Exception:
-            pass
-        cfb1, cfb2 = st.columns(2)
-        with cfb1:
-            if st.button("Clear Feedback"):
-                st.session_state.pop("manager_feedback", None)
-                st.session_state.pop("manager_feedback_input", None)
-                st.rerun()
-        with cfb2:
-            st.caption("This feedback will be considered when generating the plan.")
-
+    # (Visual Overview removed)
     # Form for skill input + analyze action
     with st.form("analysis_form", clear_on_submit=False):
         user_skill_input = st.text_area(
@@ -1200,58 +1067,212 @@ with tabs[0]:
             else:
                 st.write("None available.")
 
-            st.divider()
-            st.subheader("Gemini Learning Plan")
-            with st.spinner("Generating plan..."):
-                prompt = build_llm_prompt(selected_role, gap, stats, course_suggestions)
-                llm_output = call_gemini(prompt)
+            
 
-            st.session_state["latest_prompt"] = prompt
-            st.session_state["latest_plan"] = llm_output
+    # NEW: Show recommendations from mentor takeaways
+    st.divider()
+    st.subheader("📌 Recommendations Based on Your Mentor Session Takeaways")
 
-            # IMPORTANT: Render plan as-is to preserve exact format
-            st.markdown(llm_output)
-            with st.expander("Prompt Debug"):
-                st.code(prompt, language="markdown")
+    user = st.session_state["user"]
+    latest_takeaway = load_latest_takeaway(user["email"])
 
-    # Post-generation action buttons
-    if st.session_state.get("latest_plan"):
-        st.divider()
-        c1, c2, c3 = st.columns([1, 1, 2])
-        with c1:
-            if st.button("🔁 Regenerate Plan"):
-                if all(k in st.session_state for k in ["latest_gap", "latest_stats", "latest_course_suggestions", "latest_role"]):
-                    with st.spinner("Regenerating..."):
-                        new_prompt = build_llm_prompt(
-                            st.session_state["latest_role"],
-                            st.session_state["latest_gap"],
-                            st.session_state["latest_stats"],
-                            st.session_state["latest_course_suggestions"]
-                        )
-                        new_plan = call_gemini(new_prompt)
-                    st.session_state["latest_prompt"] = new_prompt
-                    st.session_state["latest_plan"] = new_plan
-                    st.rerun()
+    if not latest_takeaway:
+        st.info("No takeaways yet. Attend mentor sessions and add takeaways.")
+    else:
+        recs = recommend_courses_from_takeaways([latest_takeaway], df)
+        if recs:
+            cols = st.columns(2)
+            idx = 0
+            for skill, courses in recs.items():
+                with cols[idx % 2]:
+                    st.markdown(
+                        f"""
+                        <div class="lh-card">
+                            <div class="lh-section">{skill}</div>
+                            <div class="lh-small lh-muted">Suggested from your latest takeaway</div>
+                            <div style="margin-top:6px;">
+                                {' '.join(f'<span class="lh-pill">📘 {c}</span>' for c in courses)}
+                            </div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+                idx += 1
+        else:
+            st.info("No matching courses found for your latest takeaway.")
+    st.divider()
+
+    # Manager Feedback Section with Sentiment Analysis (optional)
+    st.subheader("📌 Manager Feedback ")
+    st.caption("Optionally include summarized feedback from your manager. We'll analyze sentiment and factor it into the AI plan if you enable it.")
+
+    # Checkbox to enable manager feedback (default: False)
+    include_feedback = st.checkbox("Include manager feedback?", value=False, key="include_manager_feedback")
+
+    # Initialize sentiment analyzer lazily only when feedback is enabled
+    if include_feedback:
+        if "_vader" not in st.session_state:
+            try:
+                st.session_state["_vader"] = SentimentIntensityAnalyzer()
+            except Exception:
+                st.session_state["_vader"] = None
+
+        # Provide quick mock feedback examples
+        mock_cols = st.columns(3)
+        with mock_cols[0]:
+            if st.button("Insert Positive Mock"):
+                st.session_state["manager_feedback_input"] = (
+                    "Great progress on Python and SAP BTP tasks. Keep up the pace; your SQL still needs polishing."
+                )
+        with mock_cols[1]:
+            if st.button("Insert Mixed Mock"):
+                st.session_state["manager_feedback_input"] = (
+                    "You're proactive and collaborate well. However, dashboards in Power BI lack depth and need more advanced features."
+                )
+        with mock_cols[2]:
+            if st.button("Insert Negative Mock"):
+                st.session_state["manager_feedback_input"] = (
+                    "Delivery has been inconsistent and the last integration had multiple defects. SQL and API design must improve quickly."
+                )
+
+        fb_text = st.text_area(
+            "Manager Feedback",
+            key="manager_feedback_input",
+            height=100,
+            placeholder="E.g., Strong collaboration and Python skills, but needs improvement in SQL and Power BI visuals...",
+        )
+
+        fb_analyzed = False
+        if st.button("Analyze Feedback Sentiment"):
+            if not fb_text:
+                st.warning("Please enter feedback text first.")
+            elif st.session_state.get("_vader") is None:
+                st.error("Sentiment analyzer not available. Install vaderSentiment and reload.")
+            else:
+                scores = st.session_state["_vader"].polarity_scores(fb_text)
+                comp = round(scores.get("compound", 0.0), 3)
+                if comp >= 0.05:
+                    label = "Positive"
+                elif comp <= -0.05:
+                    label = "Negative"
                 else:
-                    st.warning("Missing context to regenerate.")
-        with c2:
-            if st.button("✅ Accept Plan"):
-                st.session_state["chosen_upskillingplan"] = st.session_state["latest_plan"]
-                st.session_state["accepted_plan_role"] = st.session_state.get("latest_role")
-                st.session_state["accepted_at"] = datetime.utcnow().isoformat()
-                st.success("Plan accepted. Track it in the Progress Tracker tab.")
-        with c3:
-            if st.button("🧹 Clear Generated Plan"):
-                for key in [
-                    "latest_gap", "latest_stats", "latest_course_suggestions",
-                    "latest_role", "latest_prompt", "latest_plan"
-                ]:
-                    st.session_state.pop(key, None)
-                st.info("Cleared.")
-                st.rerun()
+                    label = "Neutral"
+                # simple heuristic highlights: extract skill words present in role_df_view
+                skills = set(role_df_view["Skill"].tolist())
+                found = [s for s in skills if re.search(rf"\b{re.escape(s)}\b", fb_text, re.IGNORECASE)]
+                st.session_state["manager_feedback"] = {
+                    "text": fb_text,
+                    "scores": scores,
+                    "compound": comp,
+                    "sentiment_label": label,
+                    "highlights": ", ".join(found) if found else None,
+                    "analyzed_at": datetime.utcnow().isoformat(),
+                }
+                fb_analyzed = True
+
+        # Show only Positive vs Negative comparison if present
+        cur_fb = st.session_state.get("manager_feedback")
+        if cur_fb:
+            # Positive vs Negative comparison (metrics + mini chart)
+            scores = cur_fb.get("scores") or {}
+            try:
+                pos_pct = round(float(scores.get("pos", 0.0)) * 100, 1)
+                neg_pct = round(float(scores.get("neg", 0.0)) * 100, 1)
+                comp_cols = st.columns(2)
+                with comp_cols[0]:
+                    st.metric("Positive", f"{pos_pct}%")
+                with comp_cols[1]:
+                    st.metric("Negative", f"{neg_pct}%")
+                df_comp = pd.DataFrame([
+                    {"Sentiment": "Positive", "Percent": pos_pct},
+                    {"Sentiment": "Negative", "Percent": neg_pct},
+                ])
+                fig_comp = px.bar(
+                    df_comp,
+                    x="Sentiment",
+                    y="Percent",
+                    color="Sentiment",
+                    color_discrete_map={"Positive": "#10b981", "Negative": "#ef4444"},
+                    title="Positive vs Negative",
+                )
+                fig_comp.update_layout(
+                    height=220,
+                    yaxis_title="%",
+                    xaxis_title="",
+                    showlegend=False,
+                    margin=dict(l=10, r=10, t=40, b=10),
+                    yaxis=dict(range=[0, 100])
+                )
+                st.plotly_chart(fig_comp, use_container_width=True)
+            except Exception:
+                pass
+            cfb1, cfb2 = st.columns(2)
+            with cfb1:
+                if st.button("Clear Feedback"):
+                    st.session_state.pop("manager_feedback", None)
+                    st.session_state.pop("manager_feedback_input", None)
+                    st.rerun()
+            with cfb2:
+                st.caption("This feedback will be considered when generating the plan.")
+    # Do not automatically clear analyzed feedback when the user unchecks the "Include" box.
+    # Users can clear feedback explicitly with the Clear Feedback button.
+
+    
+    # Post-generation action buttons
+st.divider()
+c1, c2, c3 = st.columns([1, 1, 2])
+
+# Dynamic label
+label = "🔁 Regenerate Plan" if st.session_state.get("latest_plan") else "🚀 Generate Plan"
+
+with c1:
+    if st.button(label):
+        if all(k in st.session_state for k in ["latest_gap", "latest_stats", "latest_course_suggestions", "latest_role"]):
+            with st.spinner("Generating plan..."):
+                new_prompt = build_llm_prompt(
+                    st.session_state["latest_role"],
+                    st.session_state["latest_gap"],
+                    st.session_state["latest_stats"],
+                    st.session_state["latest_course_suggestions"],
+                    takeaway_text=st.session_state.get("latest_takeaway")
+
+                )
+                new_plan = call_gemini(new_prompt)
+            st.session_state["latest_prompt"] = new_prompt
+            st.session_state["latest_plan"] = new_plan
+            st.rerun()
+        else:
+            st.warning("Run skill gap analysis first before generating a plan.")
+
+with c2:
+    if st.session_state.get("latest_plan"):
+        if st.button("✅ Accept Plan"):
+            st.session_state["chosen_upskillingplan"] = st.session_state["latest_plan"]
+            st.session_state["accepted_plan_role"] = st.session_state.get("latest_role")
+            st.session_state["accepted_at"] = datetime.utcnow().isoformat()
+            st.success("Plan accepted. Track it in the Progress Tracker tab.")
+
+with c3:
+    if st.session_state.get("latest_plan"):
+        if st.button("🧹 Clear Generated Plan"):
+            for key in [
+                "latest_gap", "latest_stats", "latest_course_suggestions",
+                "latest_role", "latest_prompt", "latest_plan"
+            ]:
+                st.session_state.pop(key, None)
+            st.info("Cleared.")
+            st.rerun()
+
+# Always show plan if available
+if st.session_state.get("latest_plan"):
+    st.subheader("Gemini Learning Plan")
+    st.markdown(st.session_state["latest_plan"])
+    with st.expander("Prompt Debug"):
+        st.code(st.session_state["latest_prompt"], language="markdown")
+
 
 # --------------------------------------------------
-# TAB 2: Chosen Plan
+# TAB 2: Chosen Plan (Coursera-style UI)
 # --------------------------------------------------
 with tabs[1]:
     st.header("Your Accepted Plan")
@@ -1261,24 +1282,64 @@ with tabs[1]:
     if not chosen_plan:
         st.info("No plan accepted yet.")
     else:
+        # Split into phases
         sections = split_plan_into_sections(chosen_plan)
         phase_durations = parse_phase_durations(chosen_plan)
+        progress_metrics = compute_progress_metrics()
 
-        # Display phases in a vertical list
+        # Sidebar navigation (optional)
+        phase_titles = [f"{s['title']} ({phase_durations.get(s['phase_no'], 'N/A')} wks)" for s in sections]
+        selected_title = st.sidebar.radio("📌 Jump to Phase", phase_titles) if sections else None
+
+        # Helper: decorate bullets
+        def decorate_bullets(bullets):
+            decorated = []
+            for b in bullets:
+                if "project" in b.lower():
+                    decorated.append("📝 " + b)
+                elif "course" in b.lower() or "lesson" in b.lower():
+                    decorated.append("📖 " + b)
+                elif "checkpoint" in b.lower() or "assessment" in b.lower():
+                    decorated.append("🎯 " + b)
+                else:
+                    decorated.append("• " + b)
+            return decorated
+
+        # Render each phase in a Coursera-style card
         for sec in sections:
-            courses = extract_courses(sec["body"])
-            st.markdown(f"""
-            <div style="background-color: white; border: 1px solid #d1d5db; border-radius: 12px; padding: 20px; margin-bottom: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
-                <h4 style="color: #1f2937; margin-bottom: 8px;">{sec['title']}</h4>
-                <p style="color: #6b7280; font-size: 14px; margin-bottom: 12px;">Duration: {phase_durations.get(sec['phase_no'], 'N/A')} weeks</p>
-                <p style="font-weight: bold; color: #1f2937;">{"Courses:" if courses else "Key Activities:"}</p>
-                <ul style="color: #4b5563; font-size: 14px;">
-                    {''.join(f'<li>{c}</li>' for c in (courses if courses else extract_bullets(sec["body"], max_items=4)))}
-                </ul>
-            </div>
-            """, unsafe_allow_html=True)
+            phase_no = sec["phase_no"]
+            weeks = phase_durations.get(phase_no, "N/A")
+            bullets = decorate_bullets(extract_bullets(sec["body"], max_items=6))
 
-            with st.expander("View Full Details"):
+            # Highlight if user selected this phase in sidebar
+            highlight = selected_title and selected_title.startswith(sec["title"])
+
+            card_style = "background-color:#f9fafb;border-radius:12px;padding:16px;margin-bottom:16px;box-shadow:0 2px 4px rgba(0,0,0,0.05);"
+            if highlight:
+                card_style = "background-color:#ecfdf5;border-left:4px solid #10b981;" + card_style
+
+            st.markdown(
+                f"""
+                <div style="{card_style}">
+                    <div style="font-size:18px;font-weight:600;">📘 {sec['title']}</div>
+                    <div style="color:#6b7280;font-size:14px;">Estimated Duration: {weeks} weeks</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            # Progress bar for this phase
+            if phase_no in progress_metrics["phase_pct"]:
+                st.progress(int(progress_metrics["phase_pct"][phase_no]))
+
+            # Bullets summary
+            if bullets:
+                st.markdown("**Key Activities:**")
+                for b in bullets:
+                    st.markdown(f"- {b}")
+
+            # Expand full details
+            with st.expander("📖 Full Details", expanded=False):
                 st.markdown(sec["body"])
 
 
@@ -1466,5 +1527,6 @@ with tabs[2]:
                 rebuild_checkpoints(force=True)
                 st.success("Default checkpoints rebuilt.")
                 st.rerun()
+
 
 persist_session_to_json()

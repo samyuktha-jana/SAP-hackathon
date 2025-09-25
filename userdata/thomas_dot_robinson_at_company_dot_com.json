@@ -28,18 +28,16 @@
     "created_at": "2025-09-24T15:40:45.249881"
   },
   "manager_feedback": {
-    "text": " however your power bi skills nees polishing",
+    "text": "Delivery has been inconsistent and the last integration had multiple defects. SQL and API design must improve quickly.",
     "scores": {
-      "neg": 0.0,
-      "neu": 1.0,
-      "pos": 0.0,
-      "compound": 0.0
+      "neg": 0.125,
+      "neu": 0.741,
+      "pos": 0.134,
+      "compound": 0.0516
     },
-    "compound": 0.0,
-    "sentiment_label": "Mixed",
-    "highlights": null,
-    "neg_hits": 0,
-    "neg_cues_matched": [],
-    "analyzed_at": "2025-09-25T04:53:42.222109"
+    "compound": 0.052,
+    "sentiment_label": "Positive",
+    "highlights": "Integration",
+    "analyzed_at": "2025-09-25T16:04:45.479679"
   }
 }
