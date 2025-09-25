@@ -10,7 +10,7 @@ from datetime import datetime,timezone
 import re
 import pandas as pd
 import os
-
+import difflib
 
 # --- Import onboarding chatbot ---
 from agents.onboarding_chatbot import query_gemini
@@ -330,6 +330,452 @@ def get_bookings_as_mentee(user_email):
     con.close()
     return [dict(r) for r in rows]
 
+# ------------------------- Natural language intent helpers (documents/software/modules) --------------------
+def _norm_text(t: str) -> str:
+    return (t or "").strip().lower()
+
+def _contains_any(t: str, phrases: list[str]) -> bool:
+    t = _norm_text(t)
+    return any(p in t for p in phrases)
+
+def wants_documents(t: str) -> bool:
+    t = _norm_text(t)
+    # Core nouns and verbs around signing paperwork
+    doc_nouns = [
+        "document", "documents", "doc", "docs", "paperwork", "form", "forms",
+        "contract", "agreement", "nda", "offer letter", "policy"
+    ]
+    doc_verbs = [
+        "sign", "signed", "signature", "e-sign", "e sign", "approve", "submit"
+    ]
+    doc_phrases = [
+        "documents to be signed", "documents to sign", "required documents", "what documents", "show my documents"
+    ]
+    return _contains_any(t, doc_phrases) or (
+        _contains_any(t, doc_nouns) and _contains_any(t, doc_verbs)
+    )
+
+def wants_software(t: str) -> bool:
+    t = _norm_text(t)
+    # Nouns for software
+    sw_nouns = [
+        "software", "app", "apps", "application", "applications", "tool", "tools", "program", "programs"
+    ]
+    # Verbs for obtaining/setting up software
+    sw_verbs = [
+        "install", "installed", "setup", "set up", "configure", "configured", "download", "downloading", "get"
+    ]
+    sw_phrases = [
+        "software to install", "apps to install", "required software", "what software do i need", "to install",
+        "what software should i download", "what apps should i download", "need to download"
+    ]
+    return _contains_any(t, sw_phrases) or (
+        _contains_any(t, sw_nouns) and _contains_any(t, sw_verbs)
+    )
+
+def wants_modules(t: str) -> bool:
+    t = _norm_text(t)
+    # Nouns for learning
+    mod_nouns = [
+        "module", "modules", "course", "courses", "training", "trainings", "lesson", "lessons", "learning", "lms"
+    ]
+    # Verbs for completion
+    mod_verbs = [
+        "complete", "completed", "finish", "finished", "do", "need", "required", "assigned"
+    ]
+    mod_phrases = [
+        "required learning modules", "what modules do i need", "modules to complete", "what learning modules",
+        "what modules should i complete", "which trainings do i need", "what courses do i need"
+    ]
+    return _contains_any(t, mod_phrases) or (
+        _contains_any(t, mod_nouns) and _contains_any(t, mod_verbs)
+    )
+
+#NEWLY ADDED NEHA BELOW
+# ------------------------- Seed learning progress for all users (NEW) --------------------
+def seed_learning_progress_from_assignments(assignments_csv: str = "Employee Dataset1.csv",
+                                            progress_csv: str = "LearningProgress.csv") -> None:
+    """Ensure LearningProgress.csv has a row for each (email, assigned module).
+    Missing pairs are added with completed=False. Safe to call repeatedly (idempotent).
+    """
+    try:
+        # Load assignments
+        if not os.path.exists(assignments_csv):
+            return
+        df_assign = pd.read_csv(assignments_csv)
+        if "email" not in df_assign.columns or "Learning Modules" not in df_assign.columns:
+            return
+
+        # Build target rows from assignments
+        target_rows = []
+        for _, r in df_assign.iterrows():
+            email = str(r.get("email", "")).strip().lower()
+            mods_str = r.get("Learning Modules")
+            if not email:
+                continue
+            if pd.isna(mods_str):
+                continue
+            for m in str(mods_str).split(","):
+                mod = str(m).strip()
+                if mod:
+                    target_rows.append((email, mod))
+
+        # Load existing progress
+        if os.path.exists(progress_csv):
+            df_prog = pd.read_csv(progress_csv)
+        else:
+            df_prog = pd.DataFrame(columns=["email", "module", "completed"]) \
+                     .astype({"email": str, "module": str})
+
+        if not df_prog.empty:
+            df_prog["email"] = df_prog["email"].astype(str).str.strip().str.lower()
+            df_prog["module"] = df_prog["module"].astype(str).str.strip()
+        else:
+            # ensure correct dtypes
+            df_prog = pd.DataFrame(columns=["email", "module", "completed"]) \
+                     .astype({"email": str, "module": str})
+
+        existing = set(zip(df_prog["email"].tolist(), df_prog["module"].str.lower().tolist()))
+
+        new_rows = []
+        for email, mod in target_rows:
+            key = (email, mod.lower())
+            if key not in existing:
+                new_rows.append({"email": email, "module": mod, "completed": False})
+
+        if new_rows:
+            df_prog = pd.concat([df_prog, pd.DataFrame(new_rows)], ignore_index=True)
+            tmp = progress_csv + ".tmp"
+            df_prog.to_csv(tmp, index=False)
+            os.replace(tmp, progress_csv)
+    except Exception:
+        # Fail silently to avoid user-facing errors in chat; seeding is best-effort.
+        pass
+
+# Run seeding once per app process/session
+if "_seed_progress_ran" not in st.session_state:
+    try:
+        seed_learning_progress_from_assignments()
+    except Exception:
+        pass
+    st.session_state["_seed_progress_ran"] = True
+#NEWLY ADDED NEHA ABOVE
+
+# ------------------------- Learning modules UI (NEW) --------------------
+def show_required_learning_modules(user_email: str):
+    """Render a tickable list of assigned learning modules for the logged-in user.
+    Persists updates to LearningProgress.csv.
+    """
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    emp_path = os.path.join(BASE_DIR, "Employee Dataset1.csv")
+    progress_path = os.path.join(BASE_DIR, "LearningProgress.csv")
+
+    # Load assignments for this user
+    try:
+        df = pd.read_csv(emp_path)
+        df.columns = df.columns.str.strip()
+        df["email"] = df["email"].astype(str).str.strip().str.lower()
+        row = df[df["email"] == user_email.lower()]
+        if row.empty:
+            with st.chat_message("assistant"):
+                st.info("I couldn't find your employee profile. Please check your login email.")
+            return
+        mods_str = row.iloc[0].get("Learning Modules", "")
+        modules = [m.strip() for m in str(mods_str).split(",") if str(m).strip()]
+        if not modules:
+            with st.chat_message("assistant"):
+                st.info("No learning modules assigned to your profile.")
+            return
+    except Exception as e:
+        with st.chat_message("assistant"):
+            st.error(f"Couldn't load your assigned modules: {e}")
+        return
+
+    # Load progress
+    if os.path.exists(progress_path):
+        prog = pd.read_csv(progress_path)
+    else:
+        prog = pd.DataFrame(columns=["email", "module", "completed"]) 
+    if not prog.empty:
+        prog["email"] = prog["email"].astype(str).str.strip().str.lower()
+        prog["module"] = prog["module"].astype(str).str.strip()
+        def _coerce_bool_series(s: pd.Series) -> pd.Series:
+            if s.dtype == bool:
+                return s
+            return s.apply(lambda v: str(v).strip().lower() in {"true","1","yes","y","t"})
+        prog["completed"] = _coerce_bool_series(prog.get("completed", pd.Series(dtype=bool)))
+
+    user_prog = {r["module"].strip().lower(): bool(r["completed"]) for _, r in prog[prog["email"] == user_email.lower()].iterrows()}
+
+    with st.chat_message("assistant"):
+        st.markdown("Here are your required learning modules. Tick what you’ve done and click Update.")
+        with st.form(key=f"learning_mods_form_{user_email}"):
+            checked_map = {}
+            completed_count = 0
+            for mod in modules:
+                checked = user_prog.get(mod.lower(), False)
+                val = st.checkbox(mod, value=checked, key=f"mod_{user_email}_{mod}")
+                checked_map[mod] = val
+                if val:
+                    completed_count += 1
+            submitted = st.form_submit_button("Update")
+
+        if submitted:
+            # Upsert changes to CSV
+            for mod, val in checked_map.items():
+                if prog.empty:
+                    mask_any = False
+                else:
+                    mask_any = ((prog["email"] == user_email.lower()) & (prog["module"].str.lower() == mod.lower())).any()
+                if mask_any:
+                    mask = (prog["email"] == user_email.lower()) & (prog["module"].str.lower() == mod.lower())
+                    prog.loc[mask, "completed"] = bool(val)
+                else:
+                    prog = pd.concat([prog, pd.DataFrame([{ "email": user_email.lower(), "module": mod, "completed": bool(val)}])], ignore_index=True)
+
+            # Deduplicate by (email, module lowercased), keep the last occurrence (most recent)
+            if not prog.empty:
+                prog["email"] = prog["email"].astype(str).str.strip().str.lower()
+                prog["module"] = prog["module"].astype(str).str.strip()
+                prog["_module_norm"] = prog["module"].str.lower()
+                prog = prog.reset_index(drop=True)
+                prog = prog.drop_duplicates(subset=["email", "_module_norm"], keep="last")
+                prog = prog.drop(columns=["_module_norm"], errors="ignore")
+
+            tmp = progress_path + ".tmp"
+            prog.to_csv(tmp, index=False)
+            os.replace(tmp, progress_path)
+            # Ensure filesystem mtime changes so other pages (dashboard) detect updates for widget keys
+            try:
+                os.utime(progress_path, None)
+            except Exception:
+                pass
+
+            
+
+            st.success(f"Saved. {completed_count}/{len(modules)} modules completed.")
+            # Quick read-back to show what the dashboard will see
+            try:
+                _check = pd.read_csv(progress_path)
+                if not _check.empty:
+                    _check["email"] = _check["email"].astype(str).str.strip().str.lower()
+                    _check["module"] = _check["module"].astype(str).str.strip()
+                    _check_map = {r["module"].strip().lower(): bool(r.get("completed", False)) for _, r in _check[_check["email"] == user_email.lower()].iterrows()}
+                    done_now = [m for m in modules if _check_map.get(m.lower(), False)]
+                    st.caption("Now marked complete: " + (", ".join(done_now) if done_now else "None yet"))
+            except Exception:
+                pass
+            # Also append a brief assistant message to chat history DB
+            msg = f"Updated your learning progress: {completed_count}/{len(modules)} completed."
+            st.session_state.all_messages[user_email].append(AIMessage(msg))
+            save_message(user_email, "assistant", msg)
+
+            # Auto-collapse the pinned UI immediately after update
+            st.session_state["show_learning_modules_ui"] = False
+            st.session_state["modules_ui_ack_sent"] = False
+            st.rerun()
+
+           
+
+
+
+
+# ------------------------- Documents UI (NEW) --------------------
+def show_required_documents(user_email: str):
+    """Render a tickable list of required documents for the logged-in user.
+    Persists updates to DocumentsProgress.csv.
+    """
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    emp_path = os.path.join(BASE_DIR, "Employee Dataset1.csv")
+    progress_path = os.path.join(BASE_DIR, "DocumentsProgress.csv")
+
+    # Load assignments for this user
+    try:
+        df = pd.read_csv(emp_path)
+        df.columns = df.columns.str.strip()
+        df["email"] = df["email"].astype(str).str.strip().str.lower()
+        row = df[df["email"] == user_email.lower()]
+        if row.empty:
+            with st.chat_message("assistant"):
+                st.info("I couldn't find your employee profile. Please check your login email.")
+            return
+        docs_str = row.iloc[0].get("Documents to be signed", "")
+        documents = [m.strip() for m in str(docs_str).split(",") if str(m).strip()]
+        if not documents:
+            with st.chat_message("assistant"):
+                st.info("No documents assigned to your profile.")
+            return
+    except Exception as e:
+        with st.chat_message("assistant"):
+            st.error(f"Couldn't load your required documents: {e}")
+        return
+
+    # Load progress
+    if os.path.exists(progress_path):
+        prog = pd.read_csv(progress_path)
+    else:
+        prog = pd.DataFrame(columns=["email", "item", "completed"]) 
+    if not prog.empty:
+        prog["email"] = prog["email"].astype(str).str.strip().str.lower()
+        prog["item"] = prog["item"].astype(str).str.strip()
+        def _coerce_bool_series(s: pd.Series) -> pd.Series:
+            if s.dtype == bool:
+                return s
+            return s.apply(lambda v: str(v).strip().lower() in {"true","1","yes","y","t"})
+        prog["completed"] = _coerce_bool_series(prog.get("completed", pd.Series(dtype=bool)))
+
+    user_prog = {r["item"].strip().lower(): bool(r["completed"]) for _, r in prog[prog["email"] == user_email.lower()].iterrows()}
+
+    with st.chat_message("assistant"):
+        st.markdown("Here are your required documents. Tick what you’ve completed and click Update.")
+        with st.form(key=f"docs_form_{user_email}"):
+            checked_map = {}
+            completed_count = 0
+            for doc in documents:
+                checked = user_prog.get(doc.lower(), False)
+                val = st.checkbox(doc, value=checked, key=f"doc_{user_email}_{doc}")
+                checked_map[doc] = val
+                if val:
+                    completed_count += 1
+            submitted = st.form_submit_button("Update")
+
+        if submitted:
+            # Upsert changes to CSV
+            for doc, val in checked_map.items():
+                if prog.empty:
+                    mask_any = False
+                else:
+                    mask_any = ((prog["email"] == user_email.lower()) & (prog["item"].str.lower() == doc.lower())).any()
+                if mask_any:
+                    mask = (prog["email"] == user_email.lower()) & (prog["item"].str.lower() == doc.lower())
+                    prog.loc[mask, "completed"] = bool(val)
+                else:
+                    prog = pd.concat([prog, pd.DataFrame([{ "email": user_email.lower(), "item": doc, "completed": bool(val)}])], ignore_index=True)
+
+            # Deduplicate by (email, item lowercased)
+            if not prog.empty:
+                prog["email"] = prog["email"].astype(str).str.strip().str.lower()
+                prog["item"] = prog["item"].astype(str).str.strip()
+                prog["_item_norm"] = prog["item"].str.lower()
+                prog = prog.reset_index(drop=True)
+                prog = prog.drop_duplicates(subset=["email", "_item_norm"], keep="last")
+                prog = prog.drop(columns=["_item_norm"], errors="ignore")
+
+            tmp = progress_path + ".tmp"
+            prog.to_csv(tmp, index=False)
+            os.replace(tmp, progress_path)
+            try:
+                os.utime(progress_path, None)
+            except Exception:
+                pass
+
+
+            st.success(f"Saved. {completed_count}/{len(documents)} documents completed.")
+
+            # Auto-collapse the pinned UI immediately after update
+            st.session_state["show_documents_ui"] = False
+            st.session_state["documents_ui_ack_sent"] = False
+            st.rerun()
+
+ 
+
+
+# ------------------------- Software UI (NEW) --------------------
+def show_required_software(user_email: str):
+    """Render a tickable list of required software to install for the user.
+    Persists updates to InstallProgress.csv.
+    """
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    emp_path = os.path.join(BASE_DIR, "Employee Dataset1.csv")
+    progress_path = os.path.join(BASE_DIR, "InstallProgress.csv")
+
+    # Load assignments
+    try:
+        df = pd.read_csv(emp_path)
+        df.columns = df.columns.str.strip()
+        df["email"] = df["email"].astype(str).str.strip().str.lower()
+        row = df[df["email"] == user_email.lower()]
+        if row.empty:
+            with st.chat_message("assistant"):
+                st.info("I couldn't find your employee profile. Please check your login email.")
+            return
+        sw_str = row.iloc[0].get("To Install", "")
+        softwares = [m.strip() for m in str(sw_str).split(",") if str(m).strip()]
+        if not softwares:
+            with st.chat_message("assistant"):
+                st.info("No required software found for your profile.")
+            return
+    except Exception as e:
+        with st.chat_message("assistant"):
+            st.error(f"Couldn't load your required software: {e}")
+        return
+
+    # Load progress
+    if os.path.exists(progress_path):
+        prog = pd.read_csv(progress_path)
+    else:
+        prog = pd.DataFrame(columns=["email", "item", "completed"]) 
+    if not prog.empty:
+        prog["email"] = prog["email"].astype(str).str.strip().str.lower()
+        prog["item"] = prog["item"].astype(str).str.strip()
+        def _coerce_bool_series(s: pd.Series) -> pd.Series:
+            if s.dtype == bool:
+                return s
+            return s.apply(lambda v: str(v).strip().lower() in {"true","1","yes","y","t"})
+        prog["completed"] = _coerce_bool_series(prog.get("completed", pd.Series(dtype=bool)))
+
+    user_prog = {r["item"].strip().lower(): bool(r["completed"]) for _, r in prog[prog["email"] == user_email.lower()].iterrows()}
+
+    with st.chat_message("assistant"):
+        st.markdown("Here are your required software. Tick what you’ve installed and click Update.")
+        with st.form(key=f"sw_form_{user_email}"):
+            checked_map = {}
+            completed_count = 0
+            for sw in softwares:
+                checked = user_prog.get(sw.lower(), False)
+                val = st.checkbox(sw, value=checked, key=f"sw_{user_email}_{sw}")
+                checked_map[sw] = val
+                if val:
+                    completed_count += 1
+            submitted = st.form_submit_button("Update")
+
+        if submitted:
+            for sw, val in checked_map.items():
+                if prog.empty:
+                    mask_any = False
+                else:
+                    mask_any = ((prog["email"] == user_email.lower()) & (prog["item"].str.lower() == sw.lower())).any()
+                if mask_any:
+                    mask = (prog["email"] == user_email.lower()) & (prog["item"].str.lower() == sw.lower())
+                    prog.loc[mask, "completed"] = bool(val)
+                else:
+                    prog = pd.concat([prog, pd.DataFrame([{ "email": user_email.lower(), "item": sw, "completed": bool(val)}])], ignore_index=True)
+
+            if not prog.empty:
+                prog["email"] = prog["email"].astype(str).str.strip().str.lower()
+                prog["item"] = prog["item"].astype(str).str.strip()
+                prog["_item_norm"] = prog["item"].str.lower()
+                prog = prog.reset_index(drop=True)
+                prog = prog.drop_duplicates(subset=["email", "_item_norm"], keep="last")
+                prog = prog.drop(columns=["_item_norm"], errors="ignore")
+
+            tmp = progress_path + ".tmp"
+            prog.to_csv(tmp, index=False)
+            os.replace(tmp, progress_path)
+            try:
+                os.utime(progress_path, None)
+            except Exception:
+                pass
+
+            st.success(f"Saved. {completed_count}/{len(softwares)} software installed.")
+            # Auto-collapse the pinned UI immediately after update
+            st.session_state["show_software_ui"] = False
+            st.session_state["software_ui_ack_sent"] = False
+            st.rerun()
+
+            
+
+            
 # ---------------- Session State ----------------
 if "user" not in st.session_state:
     st.session_state.user = None
@@ -345,6 +791,19 @@ if "ticket_stage" not in st.session_state:
     st.session_state.ticket_stage = None
 if "ticket_data" not in st.session_state:
     st.session_state.ticket_data = {}
+if "show_learning_modules_ui" not in st.session_state:
+    st.session_state.show_learning_modules_ui = False
+if "modules_ui_ack_sent" not in st.session_state:
+    st.session_state.modules_ui_ack_sent = False
+if "show_documents_ui" not in st.session_state:
+    st.session_state.show_documents_ui = False
+if "documents_ui_ack_sent" not in st.session_state:
+    st.session_state.documents_ui_ack_sent = False
+if "show_software_ui" not in st.session_state:
+    st.session_state.show_software_ui = False
+if "software_ui_ack_sent" not in st.session_state:
+    st.session_state.software_ui_ack_sent = False
+
 
 # ---------------- Login ----------------
 if not st.session_state.user:
@@ -399,6 +858,14 @@ else:
         user_email = st.session_state.user["email"]
         st.session_state.all_messages[user_email] = []
         st.session_state.memories[user_email].clear()
+        # Also collapse the pinned learning modules UI (Code 2) so it disappears
+        st.session_state["show_learning_modules_ui"] = False
+        st.session_state["modules_ui_ack_sent"] = False
+        # Also collapse the pinned documents/software checklists
+        st.session_state["show_documents_ui"] = False
+        st.session_state["documents_ui_ack_sent"] = False
+        st.session_state["show_software_ui"] = False
+        st.session_state["software_ui_ack_sent"] = False
         st.sidebar.success("Chat cleared from screen (history still saved).")
         st.rerun()
 
@@ -478,53 +945,155 @@ else:
                 save_message(user_email, "assistant", final_response)
 
             else:
-                # --- Routing logic for onboarding vs mentor agent ---
-                chat_history = []
-                for message in st.session_state.all_messages[user_email]:
-                    if isinstance(message, HumanMessage):
-                        chat_history.append(f"You: {message.content}")
-                    else:
-                        chat_history.append(f"Bot: {message.content}")
-
-                onboarding_response = query_gemini(prompt, chat_history=chat_history)
-                modified_prompt = f"(User email: {user_email}) {prompt}"
-                result = st.session_state.user_agent.invoke({"input": modified_prompt})
-                mentor_response = result["output"]
-
-                try:
-                    mentors = eval(mentor_response)
-                except Exception:
-                    mentors = None
-
-                fallback_phrases = [
-                    "I am sorry", "I cannot answer", "I don't know", "not able to", "cannot help"
+                # --- Route: required learning modules for this user ---
+                lp = prompt.lower()
+                # Documents triggers
+                documents_triggers = [
+                    "documents to be signed",
+                    "documents to sign",
+                    "required documents",
+                    "show my documents",
+                    "what documents do i need",
                 ]
-                def is_fallback(resp):
-                    return any(phrase in resp.lower() for phrase in fallback_phrases)
+                if any(t in lp for t in documents_triggers):
+                    st.session_state["show_documents_ui"] = True
+                    if not st.session_state.get("documents_ui_ack_sent"):
+                        ack_msg = "Sure — here are your required documents below."
+                        with st.chat_message("assistant"):
+                            st.markdown(ack_msg)
+                        st.session_state.all_messages[user_email].append(AIMessage(ack_msg))
+                        save_message(user_email, "assistant", ack_msg)
+                        st.session_state["documents_ui_ack_sent"] = True
+                    st.rerun()
 
-                if mentors and isinstance(mentors, list) and all("name" in m for m in mentors):
-                    final_response = "Here are some mentors you can choose 👇"
-                    st.session_state.last_mentors = mentors
-                elif not is_fallback(onboarding_response) and onboarding_response.strip() != "":
-                    final_response = onboarding_response
+                # Software triggers
+                software_triggers = [
+                    "to install",
+                    "software to install",
+                    "apps to install",
+                    "required software",
+                    "what software do i need",
+                ]
+                if any(t in lp for t in software_triggers):
+                    st.session_state["show_software_ui"] = True
+                    if not st.session_state.get("software_ui_ack_sent"):
+                        ack_msg = "Sure — here are your required software below."
+                        with st.chat_message("assistant"):
+                            st.markdown(ack_msg)
+                        st.session_state.all_messages[user_email].append(AIMessage(ack_msg))
+                        save_message(user_email, "assistant", ack_msg)
+                        st.session_state["software_ui_ack_sent"] = True
+                    st.rerun()
+
+                module_triggers = [
+                    "what modules do i need",
+                    "modules do i need to do",
+                    "required learning modules",
+                    "what learning modules",
+                    "modules to complete",
+                    "what modules should i complete",
+                ]
+                if any(t in lp for t in module_triggers):
+                    # Code 2 behavior: set sticky flags, send one-time ack, then rerun so UI renders at bottom
+                    st.session_state["show_learning_modules_ui"] = True
+                    if not st.session_state.get("modules_ui_ack_sent"):
+                        ack_msg = "Sure — here are your required learning modules below."
+                        with st.chat_message("assistant"):
+                            st.markdown(ack_msg)
+                        st.session_state.all_messages[user_email].append(AIMessage(ack_msg))
+                        save_message(user_email, "assistant", ack_msg)
+                        st.session_state["modules_ui_ack_sent"] = True
+                    st.rerun()
                 else:
-                    final_response = mentor_response
+                    # --- Routing logic for onboarding vs mentor agent ---
+                    chat_history = []
+                    for message in st.session_state.all_messages[user_email]:
+                        if isinstance(message, HumanMessage):
+                            chat_history.append(f"You: {message.content}")
+                        else:
+                            chat_history.append(f"Bot: {message.content}")
 
-                with st.chat_message("assistant"):
-                    st.markdown(final_response)
+                    onboarding_response = query_gemini(prompt, chat_history=chat_history)
+                    modified_prompt = f"(User email: {user_email}) {prompt}"
+                    result = st.session_state.user_agent.invoke({"input": modified_prompt})
+                    mentor_response = result["output"]
+                    try:
+                        mentors = eval(mentor_response)
+                    except Exception:
+                        mentors = None
 
-                st.session_state.all_messages[user_email].append(
-                    AIMessage(final_response if not mentors else "Mentor options displayed.")
-                )
-                save_message(user_email, "assistant", final_response)
+                    fallback_phrases = [
+                        "I am sorry", "I cannot answer", "I don't know", "not able to", "cannot help"
+                    ]
+                    def is_fallback(resp):
+                        return any(phrase in resp.lower() for phrase in fallback_phrases)
+
+                    if mentors and isinstance(mentors, list) and all("name" in m for m in mentors):
+                        final_response = "Here are some mentors you can choose 👇"
+                        st.session_state.last_mentors = mentors
+                    elif not is_fallback(onboarding_response) and onboarding_response.strip() != "":
+                        final_response = onboarding_response
+                    else:
+                        final_response = mentor_response
+
+                    with st.chat_message("assistant"):
+                        st.markdown(final_response)
+
+                    st.session_state.all_messages[user_email].append(
+                        AIMessage(final_response if not mentors else "Mentor options displayed.")
+                    )
+                    save_message(user_email, "assistant", final_response)
 
             # --- Learning module completion auto-update ---
-            # Look for phrases like "I have completed <module>"
-            match = re.search(r"i have completed (.+)", prompt.strip(), re.IGNORECASE)
-            if match:
-                completed_module = match.group(1).strip().rstrip(".")
-                # Path to progress CSV (must match dashboard)
+            # Detect phrases like "I have completed <module>", "I completed <module>", "I finished <module>"
+            completion_patterns = [
+                r"\bi have completed\s+(.+)",
+                r"\bi completed\s+(.+)",
+                r"\bi've completed\s+(.+)",
+                r"\bi have finished\s+(.+)",
+                r"\bi finished\s+(.+)",
+                r"\bi'?m done with\s+(.+)",
+                r"\bi am done with\s+(.+)",
+                r"\bi (?:completed|finished)\s+the\s+(.+?)\s+module\b",
+                # common typo
+                r"\bi have comeplted\s+(.+)",
+                r"\bi comeplted\s+(.+)"
+            ]
+
+            completed_module = None
+            for pat in completion_patterns:
+                m = re.search(pat, prompt.strip(), re.IGNORECASE)
+                if m:
+                    completed_module = m.group(1).strip().strip(".! ")
+                    break
+
+            if completed_module:
+                # Try to resolve to one of the user's assigned modules
                 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+                assigned_path = os.path.join(BASE_DIR, "Employee Dataset1.csv")
+                assigned_modules: list[str] = []
+                try:
+                    df_emp = pd.read_csv(assigned_path)
+                    row = df_emp[df_emp["email"].astype(str).str.strip().str.lower() == user_email.lower()]
+                    if not row.empty and "Learning Modules" in df_emp.columns:
+                        mods_str = str(row.iloc[0]["Learning Modules"]) if not pd.isna(row.iloc[0]["Learning Modules"]) else ""
+                        assigned_modules = [m.strip() for m in mods_str.split(",") if str(m).strip()]
+                except Exception:
+                    assigned_modules = []
+
+                canonical_module = completed_module
+                if assigned_modules:
+                    lower_map = {m.lower(): m for m in assigned_modules}
+                    key = completed_module.lower()
+                    if key in lower_map:
+                        canonical_module = lower_map[key]
+                    else:
+                        choices = list(lower_map.keys())
+                        match_l = difflib.get_close_matches(key, choices, n=1, cutoff=0.6)
+                        if match_l:
+                            canonical_module = lower_map[match_l[0]]
+
+                # Path to progress CSV (must match dashboard)
                 progress_path = os.path.join(BASE_DIR, "LearningProgress.csv")
                 # Load or create progress CSV
                 if os.path.exists(progress_path):
@@ -532,18 +1101,46 @@ else:
                 else:
                     progress_df = pd.DataFrame(columns=["email", "module", "completed"])
                 # Normalize
-                progress_df["email"] = progress_df["email"].astype(str).str.strip().str.lower()
-                progress_df["module"] = progress_df["module"].astype(str).str.strip()
+                if not progress_df.empty:
+                    progress_df["email"] = progress_df["email"].astype(str).str.strip().str.lower()
+                    progress_df["module"] = progress_df["module"].astype(str).str.strip()
                 # Update or add the completed module for this user
-                mask = (progress_df["email"] == user_email) & (progress_df["module"].str.lower() == completed_module.lower())
-                if mask.any():
+                if progress_df.empty:
+                    mask_any = False
+                else:
+                    mask_any = ((progress_df["email"] == user_email.lower()) & (progress_df["module"].str.lower() == canonical_module.lower())).any()
+                if mask_any:
+                    mask = (progress_df["email"] == user_email.lower()) & (progress_df["module"].str.lower() == canonical_module.lower())
                     progress_df.loc[mask, "completed"] = True
                 else:
                     progress_df = pd.concat([
                         progress_df,
-                        pd.DataFrame([{"email": user_email, "module": completed_module, "completed": True}])
+                        pd.DataFrame([{ "email": user_email.lower(), "module": canonical_module, "completed": True }])
                     ], ignore_index=True)
-                progress_df.to_csv(progress_path, index=False) 
+                # Deduplicate by (email, module lowercased), keep the last occurrence
+                if not progress_df.empty:
+                    progress_df["email"] = progress_df["email"].astype(str).str.strip().str.lower()
+                    progress_df["module"] = progress_df["module"].astype(str).str.strip()
+                    progress_df["_module_norm"] = progress_df["module"].str.lower()
+                    progress_df = progress_df.reset_index(drop=True)
+                    progress_df = progress_df.drop_duplicates(subset=["email", "_module_norm"], keep="last")
+                    progress_df = progress_df.drop(columns=["_module_norm"], errors="ignore")
+
+                # Atomic write + mtime bump so dashboard refreshes widget keys
+                tmp = progress_path + ".tmp"
+                progress_df.to_csv(tmp, index=False)
+                os.replace(tmp, progress_path)
+                try:
+                    os.utime(progress_path, None)
+                except Exception:
+                    pass
+
+                # Confirm to the user
+                confirm_msg = f"✅ Noted. Marked ‘{canonical_module}’ as completed. It will appear ticked under Required Learning Modules on your dashboard."
+                with st.chat_message("assistant"):
+                    st.markdown(confirm_msg)
+                st.session_state.all_messages[user_email].append(AIMessage(confirm_msg))
+                save_message(user_email, "assistant", confirm_msg)
 
     # --- Confirm buttons (render even when there's no new input) ---
     if st.session_state.get("pending_ticket_open"):
@@ -603,3 +1200,11 @@ else:
                         else:
                             st.warning("Please select a slot first.")
 
+    # Finally, render the learning modules UI at the bottom if flagged (pinned behavior at end of chat)
+    if st.session_state.get("show_learning_modules_ui"):
+        show_required_learning_modules(user_email)
+    # Pinned UIs for documents and software
+    if st.session_state.get("show_documents_ui"):
+        show_required_documents(user_email)
+    if st.session_state.get("show_software_ui"):
+        show_required_software(user_email)
