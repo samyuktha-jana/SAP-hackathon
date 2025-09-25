@@ -194,7 +194,7 @@ else:
             padding: 15px;
             border-radius: 10px;
             box-shadow: 2px 2px 5px rgba(0,0,0,0.2);
-            font-size: 15px;
+            font-size: 14px;
             overflow-wrap: break-word;
             margin-bottom: 20px; 
         }

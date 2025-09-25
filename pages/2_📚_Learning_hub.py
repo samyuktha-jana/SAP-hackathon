@@ -26,17 +26,31 @@ import sqlite3
 # Takeaways loader
 # --------------------------------------------------
 def load_latest_takeaway(user_email):
-    conn = sqlite3.connect("mentormatch.db")
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT takeaway 
-        FROM feedback 
-        WHERE user_email=? 
-        ORDER BY id DESC LIMIT 1
-    """, (user_email,))
-    row = cur.fetchone()
-    conn.close()
-    return row[0] if row else None
+    conn = None
+    try:
+        conn = sqlite3.connect("mentormatch.db")
+        cur = conn.cursor()
+        # Check whether the feedback table exists. If not, treat as no takeaways.
+        cur.execute("""
+            SELECT name FROM sqlite_master WHERE type='table' AND name='feedback'
+        """)
+        if not cur.fetchone():
+            return None
+
+        cur.execute("""
+            SELECT takeaway 
+            FROM feedback 
+            WHERE user_email=? 
+            ORDER BY id DESC LIMIT 1
+        """, (user_email,))
+        row = cur.fetchone()
+        return row[0] if row else None
+    except sqlite3.OperationalError:
+        # Any operational error (including missing DB) should be treated as no takeaways.
+        return None
+    finally:
+        if conn:
+            conn.close()
 
 
 def fuzzy_match_skill(skill, candidate_skills, threshold=80):
@@ -48,13 +62,25 @@ def fuzzy_match_skill(skill, candidate_skills, threshold=80):
     return None, score
 
 def detect_skills_from_takeaways(takeaways, all_skills):
-    detected = []
+    # Return detected skills ordered by earliest mention in the takeaways text.
+    # This preserves the user's emphasis (e.g., if 'Power BI' is mentioned before 'Python',
+    # Power BI courses will appear first in flattened recommendations).
+    detected_positions = {}
     for text in takeaways:
         lower_text = text.lower()
         for skill in all_skills:
-            if skill.lower() in lower_text and skill not in detected:
-                detected.append(skill)
-    return detected
+            key = skill
+            if key in detected_positions:
+                continue
+            try:
+                idx = lower_text.find(skill.lower())
+            except Exception:
+                idx = -1
+            if idx >= 0:
+                detected_positions[key] = idx
+    # Sort by earliest index (lower means earlier in text)
+    ordered = [k for k, _ in sorted(detected_positions.items(), key=lambda kv: kv[1])]
+    return ordered
 
 
 def recommend_courses_from_takeaways(takeaways, df):
@@ -132,7 +158,7 @@ _inject_custom_css()
 # ==============================
 # QUICK CONFIG FLAGS
 # ==============================
-HIDE_GAP_DISTRIBUTION_CHART = False                # Hide small bar chart in Gap Summary if True
+HIDE_GAP_DISTRIBUTION_CHART = True                 # Hide small bar chart in Gap Summary if True
 SHOW_DETAILED_GAP_TABLE_BY_DEFAULT = False         # Gap summary table expander open by default
 SHOW_CHECKPOINT_SECTION = False                    # If False, completely hide the old Checkpoints list UI
 SHOW_CHECKPOINT_FILTERS = False                    # (Only used if SHOW_CHECKPOINT_SECTION=True)
@@ -373,27 +399,28 @@ def build_llm_prompt(role, gap, stats, course_suggestions,takeaway_text=None):
             course_text.append(f"{skill}: {', '.join(courses)}")
     course_block = "\n".join(course_text) if course_text else "No baseline course suggestions found."
 
-    # Include optional manager feedback context if available in session
-    fb = st.session_state.get("manager_feedback", {})
-    # Always consider feedback if provided, even if not analyzed via the button
+    # Include optional manager feedback context only if the user enabled it
+    fb = st.session_state.get("manager_feedback") or {}
+    # Always allow feedback text to exist in session, but only include in prompt when explicitly enabled
     fb_text = fb.get("text") or st.session_state.get("manager_feedback_input") or ""
     fb_summary = None
     if fb_text:
         fb_summary = f"Manager Feedback Sentiment: {fb.get('sentiment_label','N/A')} (compound {fb.get('compound')})\nHighlights: {fb.get('highlights','') or 'N/A'}\nRaw: {fb_text[:500]}{'...' if len(fb_text)>500 else ''}"
 
-    feedback_block = f"\nManager Feedback Context:\n{fb_summary}\n" if fb_summary else ""
-    #takeaway_block = f"\nEmployee Takeaway Context:\n{takeaway_text}\n" if takeaway_text else ""
+    include_fb = bool(st.session_state.get("include_manager_feedback", False))
+    feedback_block = f"\nManager Feedback Context:\n{fb_summary}\n" if (fb_summary and include_fb) else ""
 
-    # Explicit instruction to always incorporate manager feedback into Phase 1 when present
+    # Explicit instruction to always incorporate manager feedback into Phase 1 when present AND enabled
     manager_phase1_rule = """
 IMPORTANT REQUIREMENT (if Manager Feedback is provided above):
 • Phase 1 must explicitly address the manager feedback items FIRST. For each highlighted item in feedback, include a concrete Phase 1 action (course or mini‑project) that targets it. Make this clear by starting those bullets with "(Manager priority)".
-""" if fb_text else ""
+""" if (fb_text and include_fb) else ""
 
     takeaway_rule = (
     "CRITICAL RULE: Do NOT create a separate 'Takeaway' section anywhere. "
-    "Instead, incorporate the employee takeaway context directly into Phase 1 actions "
-    "(for example, by marking a Phase 1 action as '(Employee takeaway)')."
+    "Instead, incorporate the employee takeaway context directly into Phase 1 actions. "
+    "If manager feedback / priorities are present, ensure the takeaway course recommendation is added AFTER the manager-priority bullets in Phase 1 and label that bullet exactly as '(MentorMatch Takeaway)'. "
+    "If no manager priorities exist, add a clear bullet referencing the MentorMatch takeaway courses in Phase 2."
     if takeaway_text
     else ""
     )
@@ -446,6 +473,89 @@ def call_gemini(prompt):
     except Exception as e:
         return f"Error calling Gemini: {e}"
 
+
+def ensure_recommendation_in_phase2(plan_text: str, rec_courses: list[str] | None):
+    """Ensure a bullet referencing the mentor-takeaway recommendations is present in Phase 2.
+    If Phase 2 exists, prepend the recommendation bullet (unless already present).
+    If Phase 2 doesn't exist, insert a Phase 2 section after Phase 1 or at the end.
+    """
+    if not rec_courses:
+        return plan_text
+
+    # Flatten course list to a readable string
+    rec_str = ", ".join(rec_courses)
+
+    try:
+        sections = split_plan_into_sections(plan_text)
+    except Exception:
+        sections = []
+
+    # If no parsed sections, append a Phase 2 block with MentorMatch Takeaway
+    if not sections:
+        added = (
+            f"\n\nPhase 2: Recommendations Based on Your Mentor Session Takeaways\n"
+            f"- (MentorMatch Takeaway) Recommended course(s): {rec_str}\n"
+        )
+        return plan_text + added
+
+    # Helper to check if a takeaway bullet already exists
+    def has_takeaway(body_text: str):
+        if not body_text:
+            return False
+        return "(MentorMatch Takeaway)" in body_text or "Recommendations Based on Your Mentor Session Takeaways" in body_text
+
+    # If manager feedback exists and Phase 1 present, insert into Phase 1 after manager-priority bullets
+    manager_fb = st.session_state.get("manager_feedback")
+    for sec in sections:
+        if sec.get("phase_no") == 1:
+            body = sec.get("body", "") or ""
+            if has_takeaway(body):
+                return plan_text
+            if manager_fb:
+                # Find lines and insert after last manager-priority bullet if any
+                lines = body.splitlines()
+                insert_at = 0
+                for i, ln in enumerate(lines):
+                    if ln.strip().startswith("(Manager priority)") or ln.strip().startswith("- (Manager priority)"):
+                        insert_at = i + 1
+                takeaway_bullet = f"- (MentorMatch Takeaway) Recommended course(s): {rec_str}"
+                # If no manager-priority bullets found, append at top of Phase 1
+                if insert_at <= 0:
+                    new_body = takeaway_bullet + "\n\n" + body
+                else:
+                    # Insert after the manager-priority block
+                    lines.insert(insert_at, takeaway_bullet)
+                    new_body = "\n".join(lines)
+                sec["body"] = new_body
+                rebuilt = "\n\n".join(f"{s['title']}\n\n{s['body']}" for s in sections)
+                return rebuilt
+
+    # Otherwise, try to place in Phase 2 (prepend for visibility) or create Phase 2
+    for sec in sections:
+        if sec.get("phase_no") == 2:
+            body = sec.get("body", "") or ""
+            if has_takeaway(body):
+                return plan_text
+            sec["body"] = f"- (MentorMatch Takeaway) Recommended course(s): {rec_str}\n\n" + body
+            rebuilt = "\n\n".join(f"{s['title']}\n\n{s['body']}" for s in sections)
+            return rebuilt
+
+    # Phase 2 missing: insert after Phase 1 if present, else append at end
+    insert_idx = len(sections)
+    for i, s in enumerate(sections):
+        if s.get("phase_no") == 1:
+            insert_idx = i + 1
+            break
+
+    new_sec = {
+        "title": "Phase 2: Recommendations Based on Your Mentor Session Takeaways",
+        "phase_no": 2,
+        "body": f"- (MentorMatch Takeaway) Recommended course(s): {rec_str}"
+    }
+    sections.insert(insert_idx, new_sec)
+    rebuilt = "\n\n".join(f"{s['title']}\n\n{s['body']}" for s in sections)
+    return rebuilt
+
 # --------------------------------------------------
 # Gap Summary Renderer
 # --------------------------------------------------
@@ -461,97 +571,18 @@ def render_gap_summary(stats: dict, show_toggle: bool = True):
     gap_index = stats["weighted_gap_index"]
     readiness = round((1 - gap_index) * 100, 1)
 
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Met", f"{stats['met']} ({pct(stats['met'])}%)")
-    c2.metric("Underdeveloped", f"{stats['underdeveloped']} ({pct(stats['underdeveloped'])}%)")
-    c3.metric("Missing", f"{stats['missing']} ({pct(stats['missing'])}%)")
-    c4.metric("Extra", stats['extra'])
-    c5.metric("Gap Index", gap_index)
+    # Show only percentage metrics for the three primary categories
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Met", f"{pct(stats['met'])}%")
+    c2.metric("Underdeveloped", f"{pct(stats['underdeveloped'])}%")
+    c3.metric("Missing", f"{pct(stats['missing'])}%")
 
-    st.progress(min(int(readiness), 100),
-                text=f"Readiness Score: {readiness}% (Higher is better)")
+    st.progress(min(int(readiness), 100))
+    st.caption(f"Readiness Score: {readiness}% (Higher is better)")
 
-    if not HIDE_GAP_DISTRIBUTION_CHART:
-        try:
-            import altair as alt
-            dist_df = pd.DataFrame([
-                {"Metric": "Met", "Share": pct(stats["met"])},
-                {"Metric": "Underdeveloped", "Share": pct(stats["underdeveloped"])},
-                {"Metric": "Missing", "Share": pct(stats["missing"])},
-            ])
-            chart = (
-                alt.Chart(dist_df)
-                .mark_bar()
-                .encode(
-                    x=alt.X("Metric", sort=None, title="Metric"),
-                    y=alt.Y("Share", title="Share (%)", scale=alt.Scale(domain=[0, 100])),
-                    color=alt.Color(
-                        "Metric",
-                        legend=None,
-                        scale=alt.Scale(
-                            domain=["Met", "Underdeveloped", "Missing"],
-                            range=["#2e7d32", "#f9a825", "#c62828"]
-                        )
-                    ),
-                    tooltip=["Metric", "Share"]
-                )
-                .properties(height=220)
-            )
-            st.altair_chart(chart, use_container_width=True)
-        except Exception:
-            pass
+    # Detailed breakdown table and small distribution chart removed per user preference.
 
-    if show_toggle:
-        with st.expander("Show detailed breakdown table", expanded=SHOW_DETAILED_GAP_TABLE_BY_DEFAULT):
-            readiness_score = readiness
-            rows = [
-                ("Total Required Skills", stats["total_required_skills"], 100.0),
-                ("Met", stats["met"], pct(stats["met"])),
-                ("Underdeveloped", stats["underdeveloped"], pct(stats["underdeveloped"])),
-                ("Missing", stats["missing"], pct(stats["missing"])),
-                ("Extra (Not Required)", stats["extra"], None),
-                ("Weighted Gap Index (0 best, 1 worst)", gap_index, None),
-                ("Readiness Score %", readiness_score, None),
-            ]
-            st.table(pd.DataFrame(rows, columns=["Metric", "Value", "Share (%)"]))
-
-# --------------------------------------------------
-# Visualization helpers for Tab 1 (Plotly-based)
-# --------------------------------------------------
-def _role_overview_charts(role_df_view: pd.DataFrame):
-    """Return (pie, bar) figures summarizing role requirements."""
-    try:
-        # Category distribution (donut)
-        cat_counts = (
-            role_df_view["Skill_Category"].fillna("Uncategorized").value_counts().reset_index()
-        )
-        cat_counts.columns = ["Skill_Category", "Count"]
-        pie = px.pie(
-            cat_counts,
-            values="Count",
-            names="Skill_Category",
-            hole=0.45,
-            title="Skill Categories",
-            color_discrete_sequence=px.colors.qualitative.Set3,
-        )
-        pie.update_traces(textposition="inside", textinfo="percent+label")
-
-        # Required level per skill (horizontal bar)
-        bar_df = role_df_view.copy()
-        bar_df["Skill"] = bar_df["Skill"].astype(str)
-        bar = px.bar(
-            bar_df.sort_values("Required_Level", ascending=True),
-            x="Required_Level",
-            y="Skill",
-            color="Skill_Category",
-            orientation="h",
-            title="Required Level by Skill",
-            color_discrete_sequence=px.colors.qualitative.Set2,
-        )
-        bar.update_layout(yaxis_title="", xaxis_title="Level")
-        return pie, bar
-    except Exception:
-        return None, None
+# (Removed unused visual overview helper)
 
 def _build_gap_dataframe(gap: dict, role_df_view: pd.DataFrame) -> pd.DataFrame:
     """Flatten gap dict to a dataframe suitable for charts."""
@@ -716,6 +747,52 @@ def split_plan_into_sections(plan_text: str):
             "body": "\n".join(current["lines"]).strip()
         })
     return sections
+
+
+
+def highlight_manager_priority_text(md_text: str) -> str:
+    """Return HTML-markup version of markdown with Manager priority
+    and MentorMatch Takeaway markers highlighted.
+
+    Caller should render with unsafe_allow_html=True.
+    """
+    if not md_text:
+        return md_text
+    try:
+        highlighted = md_text
+
+        # --- Highlight (Manager priority) ---
+        highlighted = re.sub(
+            r"\(Manager priority\)",
+            lambda m: '<span style="background:#fff3bf;padding:2px 6px;border-radius:4px;font-weight:700;color:#92400e;">(Manager priority)</span>',
+            highlighted,
+            flags=re.IGNORECASE,
+        )
+
+        highlighted = re.sub(
+            r"(?m)^[\s]*[-*•]?\s*<span[^>]+>\(Manager priority\)</span>.*$",
+            lambda m: f"<div style=\"background:#fff9db;padding:6px;border-radius:6px;margin:4px 0;\">{m.group(0)}</div>",
+            highlighted,
+        )
+
+        # --- Highlight (MentorMatch Takeaway) ---
+        highlighted = re.sub(
+            r"\(MentorMatch Takeaway\)",
+            lambda m: '<span style="background:#d3f9d8;padding:2px 6px;border-radius:4px;font-weight:700;color:#2b8a3e;">(MentorMatch Takeaway)</span>',
+            highlighted,
+            flags=re.IGNORECASE,
+        )
+
+        highlighted = re.sub(
+            r"(?m)^[\s]*[-*•]?\s*<span[^>]+>\(MentorMatch Takeaway\)</span>.*$",
+            lambda m: f"<div style=\"background:#e6fcf5;padding:6px;border-radius:6px;margin:4px 0;\">{m.group(0)}</div>",
+            highlighted,
+        )
+
+        return highlighted
+    except Exception:
+        return md_text
+
 
 def extract_bullets(markdown_text: str, max_items: int = 6):
     """Extract primary bullets/numbered items from a markdown chunk.
@@ -973,7 +1050,7 @@ with tabs[0]:
         3. Click Analyze to compute gaps and generate AI plan.
         4. Accept the plan to enable tracking in Progress Tracker tab.
         """)
-
+    
     df = load_role_skill_data()
     if df is None or "Role" not in df.columns:
         st.error("Failed to load role skill data.")
@@ -998,20 +1075,7 @@ with tabs[0]:
 
     st.dataframe(role_df_view, use_container_width=True, hide_index=True)
 
-    # Visual overview for quick scanning (only Tab 1)
-    with st.expander("Visual Overview", expanded=False):
-        st.caption("Category distribution and required levels per skill for the selected role.")
-        ov1, ov2 = st.columns(2)
-        pie, bar = _role_overview_charts(role_df_view)
-        with ov1:
-            if pie is not None:
-                st.plotly_chart(pie, use_container_width=True)
-        with ov2:
-            if bar is not None:
-                st.plotly_chart(bar, use_container_width=True)
-
-    
-
+    # (Visual Overview removed)
     # Form for skill input + analyze action
     with st.form("analysis_form", clear_on_submit=False):
         user_skill_input = st.text_area(
@@ -1044,18 +1108,7 @@ with tabs[0]:
             st.subheader("Gap Summary")
             render_gap_summary(stats)
 
-            # Visual Gap Explorer (only Tab 1) inside a closed-by-default dropdown
-            with st.expander("Visual Gap Explorer", expanded=False):
-                gap_bar, comp_bar, cat_bar = _gap_visual_charts(gap, role_df_view)
-                gcols = st.columns(2)
-                with gcols[0]:
-                    if gap_bar is not None:
-                        st.plotly_chart(gap_bar, use_container_width=True)
-                with gcols[1]:
-                    if comp_bar is not None:
-                        st.plotly_chart(comp_bar, use_container_width=True)
-                if cat_bar is not None:
-                    st.plotly_chart(cat_bar, use_container_width=True)
+            # Visual Gap Explorer removed per user preference.
 
             gap_tabs = st.tabs(["Missing", "Underdeveloped", "Met", "Extra"])
             with gap_tabs[0]:
@@ -1103,273 +1156,257 @@ with tabs[0]:
                 st.write("None available.")
 
             
-
+    with st.expander("📌 Recommendations Based on Your Mentor Session Takeaways", expanded=True):
     # NEW: Show recommendations from mentor takeaways
-    st.divider()
-    st.subheader("📌 Recommendations Based on Your Mentor Session Takeaways")
+        st.divider()
+        #st.subheader("Recommendations Based on Your Mentor Session Takeaways")
 
-    user = st.session_state["user"]
-    latest_takeaway = load_latest_takeaway(user["email"])
+        user = st.session_state["user"]
+        latest_takeaway = load_latest_takeaway(user["email"])
 
-    if not latest_takeaway:
-        st.info("No takeaways yet. Attend mentor sessions and add takeaways.")
-    else:
-        recs = recommend_courses_from_takeaways([latest_takeaway], df)
-        if recs:
-            cols = st.columns(2)
-            idx = 0
-            for skill, courses in recs.items():
-                with cols[idx % 2]:
-                    st.markdown(
-                        f"""
-                        <div class="lh-card">
-                            <div class="lh-section">{skill}</div>
-                            <div class="lh-small lh-muted">Suggested from your latest takeaway</div>
-                            <div style="margin-top:6px;">
-                                {' '.join(f'<span class="lh-pill">📘 {c}</span>' for c in courses)}
+        if not latest_takeaway:
+            st.info("No takeaways yet. Attend mentor sessions and add takeaways.")
+        else:
+            recs = recommend_courses_from_takeaways([latest_takeaway], df)
+            # Persist latest takeaway and recommendations so plan generation can use them
+            st.session_state["latest_takeaway"] = latest_takeaway
+            st.session_state["latest_course_suggestions"] = recs
+            # Build a flattened, ordered list of courses derived specifically from the latest takeaway
+            flat_takeaway = []
+            for v in recs.values():
+                if isinstance(v, list):
+                    flat_takeaway.extend(v)
+                elif v:
+                    flat_takeaway.append(v)
+            # Deduplicate while preserving order
+            seen = set()
+            flat_takeaway = [x for x in flat_takeaway if not (x in seen or seen.add(x))]
+            st.session_state["latest_takeaway_flat_recs"] = flat_takeaway
+            if recs:
+                cols = st.columns(2)
+                idx = 0
+                for skill, courses in recs.items():
+                    with cols[idx % 2]:
+                        st.markdown(
+                            f"""
+                            <div class="lh-card">
+                                <div class="lh-section">{skill}</div>
+                                <div class="lh-small lh-muted">Suggested from your latest takeaway</div>
+                                <div style="margin-top:6px;">
+                                    {' '.join(f'<span class="lh-pill">📘 {c}</span>' for c in courses)}
+                                </div>
                             </div>
-                        </div>
-                        """,
-                        unsafe_allow_html=True,
-                    )
-                idx += 1
-        else:
-            st.info("No matching courses found for your latest takeaway.")
-    st.divider()
-
-    # Manager Feedback Section with Sentiment Analysis
-    st.subheader("Manager Feedback (optional)")
-    st.caption("Paste or write summarized feedback from your manager. We'll analyze sentiment and factor it into the AI plan.")
-    if "_vader" not in st.session_state:
-        try:
-            st.session_state["_vader"] = SentimentIntensityAnalyzer()
-        except Exception:
-            st.session_state["_vader"] = None
-    
-    
-
-    # Provide quick mock feedback examples
-    mock_cols = st.columns(3)
-    with mock_cols[0]:
-        if st.button("Insert Positive Mock"):
-            st.session_state["manager_feedback_input"] = (
-                "Great progress on Python and SAP BTP tasks. Keep up the pace; your SQL still needs polishing."
-            )
-    with mock_cols[1]:
-        if st.button("Insert Mixed Mock"):
-            st.session_state["manager_feedback_input"] = (
-                "You're proactive and collaborate well. However, dashboards in Power BI lack depth and need more advanced features."
-            )
-    with mock_cols[2]:
-        if st.button("Insert Negative Mock"):
-            st.session_state["manager_feedback_input"] = (
-                "Delivery has been inconsistent and the last integration had multiple defects. SQL and API design must improve quickly."
-            )
-
-    fb_text = st.text_area(
-        "Manager Feedback",
-        key="manager_feedback_input",
-        height=100,
-        placeholder="E.g., Strong collaboration and Python skills, but needs improvement in SQL and Power BI visuals...",
-    )
-
-    fb_analyzed = False
-    if st.button("Analyze Feedback Sentiment"):
-        if not fb_text:
-            st.warning("Please enter feedback text first.")
-        elif st.session_state.get("_vader") is None:
-            st.error("Sentiment analyzer not available. Install vaderSentiment and reload.")
-        else:
-            scores = st.session_state["_vader"].polarity_scores(fb_text)
-            comp = round(scores.get("compound", 0.0), 3)
-            if comp >= 0.05:
-                label = "Positive"
-            elif comp <= -0.05:
-                label = "Negative"
+                            """,
+                            unsafe_allow_html=True,
+                        )
+                    idx += 1
             else:
-                label = "Neutral"
-            # simple heuristic highlights: extract skill words present in role_df_view
-            skills = set(role_df_view["Skill"].tolist())
-            found = [s for s in skills if re.search(rf"\b{re.escape(s)}\b", fb_text, re.IGNORECASE)]
-            st.session_state["manager_feedback"] = {
-                "text": fb_text,
-                "scores": scores,
-                "compound": comp,
-                "sentiment_label": label,
-                "highlights": ", ".join(found) if found else None,
-                "analyzed_at": datetime.utcnow().isoformat(),
-            }
-            fb_analyzed = True
+                st.info("No matching courses found for your latest takeaway.")
+        st.divider()
+    with st.expander("📌 Recommendations Based on Manager Feedback", expanded=True):
+        # Manager Feedback Section with Sentiment Analysis (optional)
+        st.subheader("📌 Manager Feedback ")
+        st.caption("Optionally include summarized feedback from your manager. We'll analyze sentiment and factor it into the AI plan if you enable it.")
 
-    # Show only Positive vs Negative comparison if present
-    cur_fb = st.session_state.get("manager_feedback")
-    if cur_fb:
-        # Positive vs Negative comparison (metrics + mini chart)
-        scores = cur_fb.get("scores") or {}
-        try:
-            pos_pct = round(float(scores.get("pos", 0.0)) * 100, 1)
-            neg_pct = round(float(scores.get("neg", 0.0)) * 100, 1)
-            comp_cols = st.columns(2)
-            with comp_cols[0]:
-                st.metric("Positive", f"{pos_pct}%")
-            with comp_cols[1]:
-                st.metric("Negative", f"{neg_pct}%")
-            df_comp = pd.DataFrame([
-                {"Sentiment": "Positive", "Percent": pos_pct},
-                {"Sentiment": "Negative", "Percent": neg_pct},
-            ])
-            fig_comp = px.bar(
-                df_comp,
-                x="Sentiment",
-                y="Percent",
-                color="Sentiment",
-                color_discrete_map={"Positive": "#10b981", "Negative": "#ef4444"},
-                title="Positive vs Negative",
+        # Checkbox to enable manager feedback (default: False)
+        include_feedback = st.checkbox("Include manager feedback?", value=False, key="include_manager_feedback")
+
+        # Initialize sentiment analyzer lazily only when feedback is enabled
+        if include_feedback:
+            if "_vader" not in st.session_state:
+                try:
+                    st.session_state["_vader"] = SentimentIntensityAnalyzer()
+                except Exception:
+                    st.session_state["_vader"] = None
+
+            # Provide quick mock feedback examples
+            mock_cols = st.columns(3)
+            with mock_cols[0]:
+                if st.button("Insert Positive Mock"):
+                    st.session_state["manager_feedback_input"] = (
+                        "Great progress on Python and SAP BTP tasks. Keep up the pace; your SQL still needs polishing."
+                    )
+            with mock_cols[1]:
+                if st.button("Insert Mixed Mock"):
+                    st.session_state["manager_feedback_input"] = (
+                        "You're proactive and collaborate well. However, dashboards in Power BI lack depth and need more advanced features."
+                    )
+            with mock_cols[2]:
+                if st.button("Insert Negative Mock"):
+                    st.session_state["manager_feedback_input"] = (
+                        "Delivery has been inconsistent and the last integration had multiple defects. SQL and API design must improve quickly."
+                    )
+
+            fb_text = st.text_area(
+                "Manager Feedback",
+                key="manager_feedback_input",
+                height=100,
+                placeholder="E.g., Strong collaboration and Python skills, but needs improvement in SQL and Power BI visuals...",
             )
-            fig_comp.update_layout(
-                height=220,
-                yaxis_title="%",
-                xaxis_title="",
-                showlegend=False,
-                margin=dict(l=10, r=10, t=40, b=10),
-                yaxis=dict(range=[0, 100])
-            )
-            st.plotly_chart(fig_comp, use_container_width=True)
-        except Exception:
-            pass
-        cfb1, cfb2 = st.columns(2)
-        with cfb1:
-            if st.button("Clear Feedback"):
-                st.session_state.pop("manager_feedback", None)
-                st.session_state.pop("manager_feedback_input", None)
-                st.rerun()
-        with cfb2:
-            st.caption("This feedback will be considered when generating the plan.")
+
+            fb_analyzed = False
+            if st.button("Analyze Feedback Sentiment"):
+                if not fb_text:
+                    st.warning("Please enter feedback text first.")
+                elif st.session_state.get("_vader") is None:
+                    st.error("Sentiment analyzer not available. Install vaderSentiment and reload.")
+                else:
+                    scores = st.session_state["_vader"].polarity_scores(fb_text)
+                    comp = round(scores.get("compound", 0.0), 3)
+                    if comp >= 0.05:
+                        label = "Positive"
+                    elif comp <= -0.05:
+                        label = "Negative"
+                    else:
+                        label = "Neutral"
+                    # simple heuristic highlights: extract skill words present in role_df_view
+                    skills = set(role_df_view["Skill"].tolist())
+                    found = [s for s in skills if re.search(rf"\b{re.escape(s)}\b", fb_text, re.IGNORECASE)]
+                    st.session_state["manager_feedback"] = {
+                        "text": fb_text,
+                        "scores": scores,
+                        "compound": comp,
+                        "sentiment_label": label,
+                        "highlights": ", ".join(found) if found else None,
+                        "analyzed_at": datetime.utcnow().isoformat(),
+                    }
+                    fb_analyzed = True
+
+            # Show only Positive vs Negative comparison if present
+            cur_fb = st.session_state.get("manager_feedback")
+            if cur_fb:
+                # Positive vs Negative comparison (metrics + mini chart)
+                scores = cur_fb.get("scores") or {}
+                try:
+                    pos_pct = round(float(scores.get("pos", 0.0)) * 100, 1)
+                    neg_pct = round(float(scores.get("neg", 0.0)) * 100, 1)
+                    neu_pct = round(float(scores.get("neu", 0.0)) * 100, 1)
+                    comp_cols = st.columns(3)
+                    with comp_cols[0]:
+                        st.metric("Positive", f"{pos_pct}%")
+                    with comp_cols[1]:
+                        st.metric("Negative", f"{neg_pct}%")
+                    with comp_cols[2]:
+                        st.metric("Neutral", f"{neu_pct}%")
+                    df_comp = pd.DataFrame([
+                        {"Sentiment": "Positive", "Percent": pos_pct},
+                        {"Sentiment": "Negative", "Percent": neg_pct},
+                        {"Sentiment": "Neutral", "Percent": neu_pct},
+                    ])
+                    fig_comp = px.bar(
+                        df_comp,
+                        x="Sentiment",
+                        y="Percent",
+                        color="Sentiment",
+                        color_discrete_map={"Positive": "#10b981", "Negative": "#ef4444", "Neutral": "#6b7280"},
+                        title="Sentiment Analysis Summary",
+                    )
+                    fig_comp.update_layout(
+                        height=220,
+                        yaxis_title="%",
+                        xaxis_title="",
+                        showlegend=False,
+                        margin=dict(l=10, r=10, t=40, b=10),
+                        yaxis=dict(range=[0, 100])
+                    )
+                    st.plotly_chart(fig_comp, use_container_width=True)
+                except Exception:
+                    pass
+                cfb1, cfb2 = st.columns(2)
+                with cfb1:
+                    if st.button("Clear Feedback"):
+                        st.session_state.pop("manager_feedback", None)
+                        st.session_state.pop("manager_feedback_input", None)
+                        st.rerun()
+                with cfb2:
+                    st.caption("This feedback will be considered when generating the plan.")
+        # Do not automatically clear analyzed feedback when the user unchecks the "Include" box.
+        # Users can clear feedback explicitly with the Clear Feedback button.
 
     
     # Post-generation action buttons
-st.divider()
-c1, c2, c3 = st.columns([1, 1, 2])
-
-# Dynamic label
-label = "🔁 Regenerate Plan" if st.session_state.get("latest_plan") else "🚀 Generate Plan"
-
-with c1:
-    if st.button(label):
-        if all(k in st.session_state for k in ["latest_gap", "latest_stats", "latest_course_suggestions", "latest_role"]):
-            with st.spinner("Generating plan..."):
-                new_prompt = build_llm_prompt(
-                    st.session_state["latest_role"],
-                    st.session_state["latest_gap"],
-                    st.session_state["latest_stats"],
-                    st.session_state["latest_course_suggestions"],
-                    takeaway_text=st.session_state.get("latest_takeaway")
-
-                )
-                new_plan = call_gemini(new_prompt)
-            st.session_state["latest_prompt"] = new_prompt
-            st.session_state["latest_plan"] = new_plan
-            st.rerun()
-        else:
-            st.warning("Run skill gap analysis first before generating a plan.")
-
-with c2:
+    # Always show plan if available
     if st.session_state.get("latest_plan"):
-        if st.button("✅ Accept Plan"):
-            st.session_state["chosen_upskillingplan"] = st.session_state["latest_plan"]
-            st.session_state["accepted_plan_role"] = st.session_state.get("latest_role")
-            st.session_state["accepted_at"] = datetime.utcnow().isoformat()
-            st.success("Plan accepted. Track it in the Progress Tracker tab.")
+        st.subheader("Gemini Learning Plan")
+        # Render plan with manager-priority highlights
+        st.markdown(highlight_manager_priority_text(st.session_state["latest_plan"]), unsafe_allow_html=True)
+        #with st.expander("Prompt Debug"):
+            #st.code(st.session_state["latest_prompt"], language="markdown")
 
-with c3:
-    if st.session_state.get("latest_plan"):
-        if st.button("🧹 Clear Generated Plan"):
-            for key in [
-                "latest_gap", "latest_stats", "latest_course_suggestions",
-                "latest_role", "latest_prompt", "latest_plan"
-            ]:
-                st.session_state.pop(key, None)
-            st.info("Cleared.")
-            st.rerun()
+    st.divider()
+    c1, c2, c3 = st.columns([1, 1, 2])
 
-# Always show plan if available
-if st.session_state.get("latest_plan"):
-    st.subheader("Gemini Learning Plan")
-    st.markdown(st.session_state["latest_plan"])
-    with st.expander("Prompt Debug"):
-        st.code(st.session_state["latest_prompt"], language="markdown")
+    # Dynamic label
+    label = "🔁 Regenerate Plan" if st.session_state.get("latest_plan") else "🚀 Generate Plan"
 
+    with c1:
+        if st.button(label):
+            if all(k in st.session_state for k in ["latest_gap", "latest_stats", "latest_course_suggestions", "latest_role"]):
+                with st.spinner("Generating plan..."):
+                    new_prompt = build_llm_prompt(
+                        st.session_state["latest_role"],
+                        st.session_state["latest_gap"],
+                        st.session_state["latest_stats"],
+                        st.session_state["latest_course_suggestions"],
+                        takeaway_text=st.session_state.get("latest_takeaway")
+
+                    )
+                    new_plan = call_gemini(new_prompt)
+                    # Ensure the mentor takeaway recommendations are present in Phase 2
+                    latest_takeaway = st.session_state.get("latest_takeaway")
+                    if latest_takeaway and st.session_state.get("latest_course_suggestions"):
+                        # Prefer the explicit flattened takeaway courses collected when rendering the takeaway UI
+                        flat_recs = st.session_state.get("latest_takeaway_flat_recs")
+                        if not flat_recs:
+                            # Fallback: flatten suggestions mapping
+                            flat_recs = []
+                            for v in st.session_state["latest_course_suggestions"].values():
+                                if isinstance(v, list):
+                                    flat_recs.extend(v)
+                                elif v:
+                                    flat_recs.append(v)
+                            # Deduplicate while preserving order
+                            seen = set()
+                            flat_recs = [x for x in flat_recs if not (x in seen or seen.add(x))]
+                        new_plan = ensure_recommendation_in_phase2(new_plan, flat_recs)
+                st.session_state["latest_prompt"] = new_prompt
+                st.session_state["latest_plan"] = new_plan
+                st.rerun()
+            else:
+                st.warning("Run skill gap analysis first before generating a plan.")
+
+    with c2:
+        if st.session_state.get("latest_plan"):
+            if st.button("✅ Accept Plan"):
+                st.session_state["chosen_upskillingplan"] = st.session_state["latest_plan"]
+                st.session_state["accepted_plan_role"] = st.session_state.get("latest_role")
+                st.session_state["accepted_at"] = datetime.utcnow().isoformat()
+                st.success("Plan accepted. Track it in the Progress Tracker tab.")
+
+    with c3:
+        if st.session_state.get("latest_plan"):
+            if st.button("🧹 Clear Generated Plan"):
+                for key in [
+                    "latest_gap", "latest_stats", "latest_course_suggestions",
+                    "latest_role", "latest_prompt", "latest_plan"
+                ]:
+                    st.session_state.pop(key, None)
+                st.info("Cleared.")
+                st.rerun()
 
 # --------------------------------------------------
 # TAB 2: Chosen Plan (Coursera-style UI)
 # --------------------------------------------------
 with tabs[1]:
     st.header("Your Accepted Plan")
-
     chosen_plan = st.session_state.get("chosen_upskillingplan")
-
-    if not chosen_plan:
-        st.info("No plan accepted yet.")
+    if chosen_plan:
+        st.markdown(f"**Role:** {st.session_state.get('accepted_plan_role','N/A')}")
+        st.markdown(f"**Accepted (UTC):** {st.session_state.get('accepted_at','N/A')}")
+        st.divider()
+        st.markdown(chosen_plan)
     else:
-        # Split into phases
-        sections = split_plan_into_sections(chosen_plan)
-        phase_durations = parse_phase_durations(chosen_plan)
-        progress_metrics = compute_progress_metrics()
-
-        # Sidebar navigation (optional)
-        phase_titles = [f"{s['title']} ({phase_durations.get(s['phase_no'], 'N/A')} wks)" for s in sections]
-        selected_title = st.sidebar.radio("📌 Jump to Phase", phase_titles) if sections else None
-
-        # Helper: decorate bullets
-        def decorate_bullets(bullets):
-            decorated = []
-            for b in bullets:
-                if "project" in b.lower():
-                    decorated.append("📝 " + b)
-                elif "course" in b.lower() or "lesson" in b.lower():
-                    decorated.append("📖 " + b)
-                elif "checkpoint" in b.lower() or "assessment" in b.lower():
-                    decorated.append("🎯 " + b)
-                else:
-                    decorated.append("• " + b)
-            return decorated
-
-        # Render each phase in a Coursera-style card
-        for sec in sections:
-            phase_no = sec["phase_no"]
-            weeks = phase_durations.get(phase_no, "N/A")
-            bullets = decorate_bullets(extract_bullets(sec["body"], max_items=6))
-
-            # Highlight if user selected this phase in sidebar
-            highlight = selected_title and selected_title.startswith(sec["title"])
-
-            card_style = "background-color:#f9fafb;border-radius:12px;padding:16px;margin-bottom:16px;box-shadow:0 2px 4px rgba(0,0,0,0.05);"
-            if highlight:
-                card_style = "background-color:#ecfdf5;border-left:4px solid #10b981;" + card_style
-
-            st.markdown(
-                f"""
-                <div style="{card_style}">
-                    <div style="font-size:18px;font-weight:600;">📘 {sec['title']}</div>
-                    <div style="color:#6b7280;font-size:14px;">Estimated Duration: {weeks} weeks</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-
-            # Progress bar for this phase
-            if phase_no in progress_metrics["phase_pct"]:
-                st.progress(int(progress_metrics["phase_pct"][phase_no]))
-
-            # Bullets summary
-            if bullets:
-                st.markdown("**Key Activities:**")
-                for b in bullets:
-                    st.markdown(f"- {b}")
-
-            # Expand full details
-            with st.expander("📖 Full Details", expanded=False):
-                st.markdown(sec["body"])
+        st.info("No plan accepted yet.")
 
 
 # --------------------------------------------------
@@ -1483,25 +1520,25 @@ with tabs[2]:
         mime="application/json"
     )
 
-    with st.expander("Advanced / Debug State"):
-        st.code(exp_json, language="json")
-        cols_dbg = st.columns(3)
-        with cols_dbg[0]:
-            if st.button("Full Reset Progress Tracker"):
-                st.session_state.pop("progress_tracker", None)
-                st.success("Progress tracker reset.")
-                st.rerun()
-        if SHOW_CHECKPOINT_SECTION:
-            with cols_dbg[1]:
-                if st.button("Clear All Checkpoints"):
-                    pt["checkpoints"] = []
-                    st.warning("Checkpoints cleared.")
-                    st.rerun()
-            with cols_dbg[2]:
-                if st.button("Rebuild Checkpoints (Force)"):
-                    rebuild_checkpoints(force=True)
-                    st.success("Rebuilt.")
-                    st.rerun()
+    # with st.expander("Advanced / Debug State"):
+    #     st.code(exp_json, language="json")
+    #     cols_dbg = st.columns(3)
+    #     with cols_dbg[0]:
+    #         if st.button("Full Reset Progress Tracker"):
+    #             st.session_state.pop("progress_tracker", None)
+    #             st.success("Progress tracker reset.")
+    #             st.rerun()
+    #     if SHOW_CHECKPOINT_SECTION:
+    #         with cols_dbg[1]:
+    #             if st.button("Clear All Checkpoints"):
+    #                 pt["checkpoints"] = []
+    #                 st.warning("Checkpoints cleared.")
+    #                 st.rerun()
+    #         with cols_dbg[2]:
+    #             if st.button("Rebuild Checkpoints (Force)"):
+    #                 rebuild_checkpoints(force=True)
+    #                 st.success("Rebuilt.")
+    #                 st.rerun()
 
     with st.expander("Setup (Start Date, Hours, Parse Phases)", expanded=False):
         setup_cols = st.columns([1, 1, 1])
