@@ -28,16 +28,16 @@
     "created_at": "2025-09-24T16:07:17.988467"
   },
   "manager_feedback": {
-    "text": "You're proactive and collaborate well. However, dashboards in Power BI lack depth and need more advanced features.",
+    "text": "One area for growth is your Python skills \u2014 I\u2019ve noticed you sometimes struggle with writing efficient scripts for data extraction and automation. Strengthening your Python knowledge will help you integrate SAP data more effectively and reduce manual work",
     "scores": {
-      "neg": 0.102,
-      "neu": 0.578,
-      "pos": 0.32,
-      "compound": 0.5984
+      "neg": 0.046,
+      "neu": 0.663,
+      "pos": 0.291,
+      "compound": 0.9041
     },
-    "compound": 0.598,
-    "sentiment_label": "Positive",
-    "highlights": null,
-    "analyzed_at": "2025-09-24T16:07:26.060791"
+    "compound": 0.904,
+    "sentiment_label": "Mixed",
+    "highlights": "Python",
+    "analyzed_at": "2025-09-25T04:26:14.537404"
   }
 }

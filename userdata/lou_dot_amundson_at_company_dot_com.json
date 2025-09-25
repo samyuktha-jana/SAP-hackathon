@@ -1,0 +1,43 @@
+{
+  "chosen_upskillingplan": "## Upskilling Roadmap: CX AI Solutions Engineer\n\n**Weighted Gap Index:** 0.5\n\n**Overall Goal:** Enhance Python proficiency to improve data extraction, automation, and SAP data integration.\n\n**Progress Metrics:**\n\n1. **Python Script Efficiency:** Measured by the reduction in execution time for data extraction scripts (e.g., from X seconds to Y seconds).\n2. **Automated Task Count:** Track the number of previously manual tasks automated using Python scripts.\n3. **SAP Integration Success Rate:**  Monitor the success rate of Python-driven SAP data integration processes.\n\n\n**Phase 1: Quick Wins (4 weeks, 5-6 hrs/week)**\n\n**(Manager priority) Focus: Addressing Manager Feedback on Python for efficient SAP data extraction and automation.**\n\n* **Skill:** Python (Data Extraction & Automation)\n    * **Rationale:** Directly addresses manager feedback by improving efficiency in core job functions.\n    * **Course:**  LeetCode practice sets (focus on problems related to data manipulation and algorithms).\n    * **Mini Project:** Automate a data extraction task from a sample SAP C4C dataset (e.g., extract customer data,  transform it, and output it to a CSV). This project should focus on efficient code and error handling.\n\n\n* **Skill:**  SAP C4C (Reinforcement)\n    * **Rationale:** Reinforce existing knowledge to ensure solid foundation for integration projects.\n    * **Course:** Review SAP C4C API documentation and relevant internal training materials.\n    * **Mini Project:** Develop a small C4C report using existing APIs to practice data retrieval and manipulation.\n\n\n**Phase 2: Core Skills Development (8 weeks, 5-6 hrs/week)**\n\n* **Skill:** Python (Intermediate)\n    * **Rationale:** Build a strong foundation in core Python concepts for more complex tasks.\n    * **Courses:**  Coursera: Python for Everybody & Internal: DS101 (focus on data structures, algorithms, and libraries like Pandas and NumPy).\n    * **Mini Project:** Develop a script that automates a more complex process involving data extraction from SAP C4C, cleaning and transformation using Pandas, and outputting it to a database or visualization dashboard.\n\n\n* **Skill:** AI/ML (Application)\n    * **Rationale:** Apply existing AI/ML knowledge to solve practical problems in CX context.\n    * **Course:** Explore relevant case studies and tutorials on applying ML models to customer data within SAP C4C (e.g., churn prediction, customer segmentation).\n    * **Mini Project:** Develop a simple predictive model (e.g., using regression or classification) to forecast customer behaviour based on SAP C4C data.\n\n\n**Phase 3: Advanced Skills & Integration (6 weeks, 5-6 hrs/week)**\n\n* **Skill:** Python (Advanced)\n    * **Rationale:** Develop expertise in advanced Python concepts relevant to large-scale data processing and integration.\n    * **Course:** CX104 (focus on advanced topics like multiprocessing, web scraping, and API interaction).\n    * **Mini Project:** Build a robust and scalable data pipeline for extracting, transforming, and loading (ETL) data from various sources (including SAP C4C) into a central data warehouse.\n\n\n* **Skill:** Integration (Advanced)\n    * **Rationale:** Develop advanced integration capabilities, particularly with SAP C4C and other systems.\n    * **Course:**  Focus on specific integration technologies relevant to your workplace (e.g., APIs, middleware).  Look for internal training or external courses on these technologies.\n    * **Mini Project:** Integrate a third-party CRM or analytics tool with SAP C4C using Python and appropriate APIs.\n\n\n**Interdependencies:**\n\n* Phase 1's Python mini-project relies on basic SAP C4C knowledge (Phase 1).\n* Phase 2's Python project builds upon Phase 1 and utilizes AI/ML knowledge.\n* Phase 3 projects require solid Python and integration skills from previous phases.\n\n**Timeline Summary:**\n\n* **Phase 1:** 4 weeks\n* **Phase 2:** 8 weeks\n* **Phase 3:** 6 weeks\n\n**Total Estimated Time:** 18 weeks (approximately 4 months)  This can be adjusted based on individual learning pace and available time.\n",
+  "accepted_plan_role": "CX AI Solutions Engineer",
+  "accepted_at": "2025-09-25T04:04:48.170265",
+  "progress_tracker": {
+    "start_date": "2025-09-25",
+    "weekly_hours": 6,
+    "phase_weeks": {
+      "1": 5,
+      "2": 7,
+      "3": 9
+    },
+    "checkpoints": [],
+    "phase_status": {
+      "1": {
+        "completed": false,
+        "completed_at": null
+      },
+      "2": {
+        "completed": false,
+        "completed_at": null
+      },
+      "3": {
+        "completed": false,
+        "completed_at": null
+      }
+    },
+    "created_at": "2025-09-25T01:24:18.175728"
+  },
+  "manager_feedback": {
+    "text": "You're proactive and collaborate well. However, dashboards in Power BI lack depth and need more advanced features.",
+    "scores": {
+      "neg": 0.102,
+      "neu": 0.578,
+      "pos": 0.32,
+      "compound": 0.5984
+    },
+    "compound": 0.598,
+    "sentiment_label": "Mixed",
+    "highlights": null,
+    "analyzed_at": "2025-09-25T04:12:38.116380"
+  }
+}

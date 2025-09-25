@@ -57,6 +57,16 @@ def _inject_custom_css():
         .lh-pill { display:inline-flex; align-items:center; gap:6px; padding:4px 10px; border-radius:8px; background:#f8fafc; border:1px solid #e2e8f0; font-size:12px; color:#0f172a;}
         .lh-divider { height:1px; background:linear-gradient(90deg, #ffffff, #e5e7eb, #ffffff); margin:12px 0; }
         .lh-small { font-size:12px; color:#64748b; }
+    /* Chosen Plan readability helpers */
+    .lh-phase-title { font-weight: 700; color:#0f172a; font-size: 1.05rem; margin-bottom: 6px; }
+    .lh-phase-sub { color:#475569; font-size: 0.9rem; margin-bottom: 8px; }
+    .lh-bullets { margin: 6px 0 2px 0; padding-left: 18px; }
+    .lh-bullets li { margin: 4px 0; }
+    .lh-priority { background:#fff7ed; color:#9a3412; border:1px solid #fdba74; padding:2px 6px; border-radius:6px; font-size: 12px; }
+    .lh-timeline { display:flex; flex-wrap:wrap; gap:8px; }
+    .lh-timeline .item { background:#f8fafc; border:1px solid #e2e8f0; padding:6px 10px; border-radius:8px; }
+    .lh-kv { display:flex; gap:10px; flex-wrap:wrap; }
+    .lh-kv .kv { background:#f1f5f9; border:1px solid #e2e8f0; padding:8px 10px; border-radius:8px; font-size: 13px; }
         </style>
         """,
         unsafe_allow_html=True,
@@ -602,6 +612,63 @@ def parse_phase_durations(plan_markdown: str):
             continue
     return results
 
+def split_plan_into_sections(plan_text: str):
+    """Split plan markdown into sections keyed by Phase headings.
+    Returns list of dicts: {title, phase_no, body}.
+    Gracefully falls back to one 'Overview' section if no phases detected.
+    """
+    if not plan_text:
+        return []
+    sections = []
+    current = {"title": "Overview", "phase_no": None, "lines": []}
+    phase_re = re.compile(r"^\s{0,3}(?:#+\s*)?(Phase\s+(\d+)[^\n:]*)\:?(.*)$", re.IGNORECASE)
+    for raw_line in plan_text.splitlines():
+        m = phase_re.match(raw_line)
+        if m:
+            # flush previous
+            if current["lines"]:
+                sections.append({
+                    "title": current["title"].strip(),
+                    "phase_no": current["phase_no"],
+                    "body": "\n".join(current["lines"]).strip()
+                })
+            title = m.group(1).strip().rstrip(":")
+            pno = None
+            try:
+                pno = int(m.group(2))
+            except Exception:
+                pno = None
+            rest = (m.group(3) or "").strip()
+            current = {"title": title, "phase_no": pno, "lines": ([rest] if rest else [])}
+        else:
+            current["lines"].append(raw_line)
+    if current["lines"]:
+        sections.append({
+            "title": current["title"].strip(),
+            "phase_no": current["phase_no"],
+            "body": "\n".join(current["lines"]).strip()
+        })
+    return sections
+
+def extract_bullets(markdown_text: str, max_items: int = 6):
+    """Extract primary bullets/numbered items from a markdown chunk.
+    Returns list of strings (without bullet markers)."""
+    if not markdown_text:
+        return []
+    items = []
+    for raw in markdown_text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if re.match(r"^[-*•]\s+", line):
+            items.append(re.sub(r"^[-*•]\s+", "", line))
+        elif re.match(r"^\d+\.[\)\s]", line):
+            items.append(re.sub(r"^\d+\.[\)\s]", "", line))
+        # Stop once enough items gathered to keep display compact
+        if len(items) >= max_items:
+            break
+    return items
+
 def init_progress_state():
     if "progress_tracker" not in st.session_state:
         st.session_state["progress_tracker"] = {
@@ -612,6 +679,15 @@ def init_progress_state():
             "phase_status": {},
             "created_at": datetime.utcnow().isoformat(),
         }
+    else:
+        # Backfill for older sessions that may miss keys
+        pt = st.session_state["progress_tracker"]
+        pt.setdefault("start_date", None)
+        pt.setdefault("weekly_hours", 5)
+        pt.setdefault("phase_weeks", {})
+        pt.setdefault("checkpoints", [])
+        pt.setdefault("phase_status", {})
+        pt.setdefault("created_at", datetime.utcnow().isoformat())
 
 def build_default_checkpoints(phase_weeks: dict, start_date: date):
     checkpoints = []
@@ -738,6 +814,9 @@ def ensure_phase_status():
     pt = st.session_state["progress_tracker"]
     if "phase_status" not in pt:
         pt["phase_status"] = {}
+    # Ensure phase_weeks exists
+    if "phase_weeks" not in pt or pt["phase_weeks"] is None:
+        pt["phase_weeks"] = {}
     for p in pt["phase_weeks"].keys():
         pt["phase_status"].setdefault(p, {"completed": False, "completed_at": None})
     for p in list(pt["phase_status"].keys()):
@@ -853,14 +932,16 @@ with tabs[0]:
     st.dataframe(role_df_view, use_container_width=True, hide_index=True)
 
     # Visual overview for quick scanning (only Tab 1)
-    ov1, ov2 = st.columns(2)
-    pie, bar = _role_overview_charts(role_df_view)
-    with ov1:
-        if pie is not None:
-            st.plotly_chart(pie, use_container_width=True)
-    with ov2:
-        if bar is not None:
-            st.plotly_chart(bar, use_container_width=True)
+    with st.expander("Visual Overview", expanded=False):
+        st.caption("Category distribution and required levels per skill for the selected role.")
+        ov1, ov2 = st.columns(2)
+        pie, bar = _role_overview_charts(role_df_view)
+        with ov1:
+            if pie is not None:
+                st.plotly_chart(pie, use_container_width=True)
+        with ov2:
+            if bar is not None:
+                st.plotly_chart(bar, use_container_width=True)
 
     st.divider()
 
@@ -1112,21 +1193,76 @@ with tabs[0]:
                 st.rerun()
 
 # --------------------------------------------------
-# TAB 2: Chosen Plan
+# TAB 2: Chosen Plan (Coursera-style UI)
 # --------------------------------------------------
 with tabs[1]:
     st.header("Your Accepted Plan")
+
     chosen_plan = st.session_state.get("chosen_upskillingplan")
-    if chosen_plan:
-        st.markdown(f"**Role:** {st.session_state.get('accepted_plan_role','N/A')}")
-        st.markdown(f"**Accepted (UTC):** {st.session_state.get('accepted_at','N/A')}")
-        cur_fb = st.session_state.get("manager_feedback")
-        if cur_fb:
-            st.info(f"Manager Feedback: {cur_fb.get('sentiment_label')} (compound {cur_fb.get('compound')}). Highlights: {cur_fb.get('highlights') or '—'}")
-        st.divider()
-        st.markdown(chosen_plan)
-    else:
+
+    if not chosen_plan:
         st.info("No plan accepted yet.")
+    else:
+        # Split into phases
+        sections = split_plan_into_sections(chosen_plan)
+        phase_durations = parse_phase_durations(chosen_plan)
+        progress_metrics = compute_progress_metrics()
+
+        # Sidebar navigation (optional)
+        phase_titles = [f"{s['title']} ({phase_durations.get(s['phase_no'], 'N/A')} wks)" for s in sections]
+        selected_title = st.sidebar.radio("📌 Jump to Phase", phase_titles) if sections else None
+
+        # Helper: decorate bullets
+        def decorate_bullets(bullets):
+            decorated = []
+            for b in bullets:
+                if "project" in b.lower():
+                    decorated.append("📝 " + b)
+                elif "course" in b.lower() or "lesson" in b.lower():
+                    decorated.append("📖 " + b)
+                elif "checkpoint" in b.lower() or "assessment" in b.lower():
+                    decorated.append("🎯 " + b)
+                else:
+                    decorated.append("• " + b)
+            return decorated
+
+        # Render each phase in a Coursera-style card
+        for sec in sections:
+            phase_no = sec["phase_no"]
+            weeks = phase_durations.get(phase_no, "N/A")
+            bullets = decorate_bullets(extract_bullets(sec["body"], max_items=6))
+
+            # Highlight if user selected this phase in sidebar
+            highlight = selected_title and selected_title.startswith(sec["title"])
+
+            card_style = "background-color:#f9fafb;border-radius:12px;padding:16px;margin-bottom:16px;box-shadow:0 2px 4px rgba(0,0,0,0.05);"
+            if highlight:
+                card_style = "background-color:#ecfdf5;border-left:4px solid #10b981;" + card_style
+
+            st.markdown(
+                f"""
+                <div style="{card_style}">
+                    <div style="font-size:18px;font-weight:600;">📘 {sec['title']}</div>
+                    <div style="color:#6b7280;font-size:14px;">Estimated Duration: {weeks} weeks</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            # Progress bar for this phase
+            if phase_no in progress_metrics["phase_pct"]:
+                st.progress(int(progress_metrics["phase_pct"][phase_no]))
+
+            # Bullets summary
+            if bullets:
+                st.markdown("**Key Activities:**")
+                for b in bullets:
+                    st.markdown(f"- {b}")
+
+            # Expand full details
+            with st.expander("📖 Full Details", expanded=False):
+                st.markdown(sec["body"])
+
 
 # --------------------------------------------------
 # TAB 3: Progress Tracker

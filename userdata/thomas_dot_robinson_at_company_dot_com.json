@@ -26,5 +26,20 @@
       }
     },
     "created_at": "2025-09-24T15:40:45.249881"
+  },
+  "manager_feedback": {
+    "text": " however your power bi skills nees polishing",
+    "scores": {
+      "neg": 0.0,
+      "neu": 1.0,
+      "pos": 0.0,
+      "compound": 0.0
+    },
+    "compound": 0.0,
+    "sentiment_label": "Mixed",
+    "highlights": null,
+    "neg_hits": 0,
+    "neg_cues_matched": [],
+    "analyzed_at": "2025-09-25T04:53:42.222109"
   }
 }
