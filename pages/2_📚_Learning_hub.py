@@ -621,10 +621,11 @@ def split_plan_into_sections(plan_text: str):
         return []
     sections = []
     current = {"title": "Overview", "phase_no": None, "lines": []}
-    phase_re = re.compile(r"^\s{0,3}(?:#+\s*)?(Phase\s+(\d+)[^\n:]*)\:?(.*)$", re.IGNORECASE)
     for raw_line in plan_text.splitlines():
-        m = phase_re.match(raw_line)
-        if m:
+        if re.search(r"^(?:\*\*)?\s*Phase\s+(\d+)", raw_line, re.IGNORECASE):
+            m = re.search(r"^(?:\*\*)?\s*Phase\s+(\d+)", raw_line, re.IGNORECASE)
+            phase_no = int(m.group(1))
+            title = raw_line.strip()
             # flush previous
             if current["lines"]:
                 sections.append({
@@ -632,14 +633,7 @@ def split_plan_into_sections(plan_text: str):
                     "phase_no": current["phase_no"],
                     "body": "\n".join(current["lines"]).strip()
                 })
-            title = m.group(1).strip().rstrip(":")
-            pno = None
-            try:
-                pno = int(m.group(2))
-            except Exception:
-                pno = None
-            rest = (m.group(3) or "").strip()
-            current = {"title": title, "phase_no": pno, "lines": ([rest] if rest else [])}
+            current = {"title": title, "phase_no": phase_no, "lines": []}
         else:
             current["lines"].append(raw_line)
     if current["lines"]:
@@ -660,14 +654,78 @@ def extract_bullets(markdown_text: str, max_items: int = 6):
         line = raw.strip()
         if not line:
             continue
-        if re.match(r"^[-*•]\s+", line):
-            items.append(re.sub(r"^[-*•]\s+", "", line))
+        if re.match(r"^(?:[-*•]|\*\*)\s+", line):
+            items.append(re.sub(r"^(?:[-*•]|\*\*)\s+", "", line))
         elif re.match(r"^\d+\.[\)\s]", line):
             items.append(re.sub(r"^\d+\.[\)\s]", "", line))
         # Stop once enough items gathered to keep display compact
         if len(items) >= max_items:
             break
     return items
+
+def extract_courses(markdown_text: str):
+    courses = []
+    for line in markdown_text.splitlines():
+        line = line.strip()
+        if "Courses:" in line:
+            # Parse the courses after "Courses:"
+            course_part = line.split("Courses:", 1)[-1].strip()
+            # Split by comma
+            course_list = [c.strip() for c in course_part.split(",")]
+            for c in course_list:
+                if "Coursera:" in c:
+                    course = c.split("Coursera:", 1)[-1].strip()
+                    courses.append(f"{course} (Coursera)")
+                elif "Internal:" in c:
+                    course = c.split("Internal:", 1)[-1].strip()
+                    courses.append(f"{course} (Internal)")
+                elif "Udemy:" in c:
+                    course = c.split("Udemy:", 1)[-1].strip()
+                    courses.append(f"{course} (Udemy)")
+                elif "Khan Academy:" in c:
+                    course = c.split("Khan Academy:", 1)[-1].strip()
+                    courses.append(f"{course} (Khan Academy)")
+                elif "Mode Analytics:" in c:
+                    course = c.split("Mode Analytics:", 1)[-1].strip()
+                    courses.append(f"{course} (Mode Analytics)")
+                elif "Astronomer Academy:" in c:
+                    course = c.split("Astronomer Academy:", 1)[-1].strip()
+                    courses.append(f"{course} (Astronomer Academy)")
+                elif "Andrew Ng" in c:
+                    courses.append("Machine Learning (Andrew Ng)")
+                elif "Hands-On ML" in c:
+                    courses.append("Hands-On Machine Learning (Book/O'Reilly)")
+                elif "LeetCode" in c:
+                    courses.append("LeetCode Practice (LeetCode)")
+                else:
+                    courses.append(c)
+        elif any(platform in line for platform in ["Coursera:", "Internal:", "Udemy:", "Khan Academy:", "Mode Analytics:", "Astronomer Academy:", "Andrew Ng", "Hands-On ML", "LeetCode"]):
+            # Fallback for other formats
+            if "Coursera:" in line:
+                course = line.split("Coursera:", 1)[-1].strip()
+                courses.append(f"{course} (Coursera)")
+            elif "Internal:" in line:
+                course = line.split("Internal:", 1)[-1].strip()
+                courses.append(f"{course} (Internal)")
+            elif "Udemy:" in line:
+                course = line.split("Udemy:", 1)[-1].strip()
+                courses.append(f"{course} (Udemy)")
+            elif "Khan Academy:" in line:
+                course = line.split("Khan Academy:", 1)[-1].strip()
+                courses.append(f"{course} (Khan Academy)")
+            elif "Mode Analytics:" in line:
+                course = line.split("Mode Analytics:", 1)[-1].strip()
+                courses.append(f"{course} (Mode Analytics)")
+            elif "Astronomer Academy:" in line:
+                course = line.split("Astronomer Academy:", 1)[-1].strip()
+                courses.append(f"{course} (Astronomer Academy)")
+            elif "Andrew Ng" in line:
+                courses.append("Machine Learning (Andrew Ng)")
+            elif "Hands-On ML" in line:
+                courses.append("Hands-On Machine Learning (Book/O'Reilly)")
+            elif "LeetCode" in line:
+                courses.append("LeetCode Practice (LeetCode)")
+    return list(set(courses))
 
 def init_progress_state():
     if "progress_tracker" not in st.session_state:
@@ -1193,7 +1251,7 @@ with tabs[0]:
                 st.rerun()
 
 # --------------------------------------------------
-# TAB 2: Chosen Plan (Coursera-style UI)
+# TAB 2: Chosen Plan
 # --------------------------------------------------
 with tabs[1]:
     st.header("Your Accepted Plan")
@@ -1203,64 +1261,24 @@ with tabs[1]:
     if not chosen_plan:
         st.info("No plan accepted yet.")
     else:
-        # Split into phases
         sections = split_plan_into_sections(chosen_plan)
         phase_durations = parse_phase_durations(chosen_plan)
-        progress_metrics = compute_progress_metrics()
 
-        # Sidebar navigation (optional)
-        phase_titles = [f"{s['title']} ({phase_durations.get(s['phase_no'], 'N/A')} wks)" for s in sections]
-        selected_title = st.sidebar.radio("📌 Jump to Phase", phase_titles) if sections else None
-
-        # Helper: decorate bullets
-        def decorate_bullets(bullets):
-            decorated = []
-            for b in bullets:
-                if "project" in b.lower():
-                    decorated.append("📝 " + b)
-                elif "course" in b.lower() or "lesson" in b.lower():
-                    decorated.append("📖 " + b)
-                elif "checkpoint" in b.lower() or "assessment" in b.lower():
-                    decorated.append("🎯 " + b)
-                else:
-                    decorated.append("• " + b)
-            return decorated
-
-        # Render each phase in a Coursera-style card
+        # Display phases in a vertical list
         for sec in sections:
-            phase_no = sec["phase_no"]
-            weeks = phase_durations.get(phase_no, "N/A")
-            bullets = decorate_bullets(extract_bullets(sec["body"], max_items=6))
+            courses = extract_courses(sec["body"])
+            st.markdown(f"""
+            <div style="background-color: white; border: 1px solid #d1d5db; border-radius: 12px; padding: 20px; margin-bottom: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
+                <h4 style="color: #1f2937; margin-bottom: 8px;">{sec['title']}</h4>
+                <p style="color: #6b7280; font-size: 14px; margin-bottom: 12px;">Duration: {phase_durations.get(sec['phase_no'], 'N/A')} weeks</p>
+                <p style="font-weight: bold; color: #1f2937;">{"Courses:" if courses else "Key Activities:"}</p>
+                <ul style="color: #4b5563; font-size: 14px;">
+                    {''.join(f'<li>{c}</li>' for c in (courses if courses else extract_bullets(sec["body"], max_items=4)))}
+                </ul>
+            </div>
+            """, unsafe_allow_html=True)
 
-            # Highlight if user selected this phase in sidebar
-            highlight = selected_title and selected_title.startswith(sec["title"])
-
-            card_style = "background-color:#f9fafb;border-radius:12px;padding:16px;margin-bottom:16px;box-shadow:0 2px 4px rgba(0,0,0,0.05);"
-            if highlight:
-                card_style = "background-color:#ecfdf5;border-left:4px solid #10b981;" + card_style
-
-            st.markdown(
-                f"""
-                <div style="{card_style}">
-                    <div style="font-size:18px;font-weight:600;">📘 {sec['title']}</div>
-                    <div style="color:#6b7280;font-size:14px;">Estimated Duration: {weeks} weeks</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-
-            # Progress bar for this phase
-            if phase_no in progress_metrics["phase_pct"]:
-                st.progress(int(progress_metrics["phase_pct"][phase_no]))
-
-            # Bullets summary
-            if bullets:
-                st.markdown("**Key Activities:**")
-                for b in bullets:
-                    st.markdown(f"- {b}")
-
-            # Expand full details
-            with st.expander("📖 Full Details", expanded=False):
+            with st.expander("View Full Details"):
                 st.markdown(sec["body"])
 
 
@@ -1448,6 +1466,5 @@ with tabs[2]:
                 rebuild_checkpoints(force=True)
                 st.success("Default checkpoints rebuilt.")
                 st.rerun()
-
 
 persist_session_to_json()
