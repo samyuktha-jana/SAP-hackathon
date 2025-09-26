@@ -15,6 +15,29 @@ import difflib
 # --- Import onboarding chatbot ---
 from agents.onboarding_chatbot import query_gemini
 
+# --- Sidebar profile card ---
+def sidebar_profile(user):
+    avatar = "https://cdn-icons-png.flaticon.com/512/847/847969.png"
+    name = user.get("name", "User")
+    position = user.get("position", "Employee").title()
+
+    st.sidebar.markdown(
+        f"""
+        <div style="
+            display:flex;
+            flex-direction:column;
+            align-items:center;
+            text-align:center;
+            padding:20px 10px;
+        ">
+            <img src="{avatar}" width="80" style="border-radius:50%; margin-bottom:8px;" />
+            <div style="font-size:16px; font-weight:600;">{name}</div>
+            <div style="font-size:12px; color:#aaa;">{position}</div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
 st.set_page_config(
     page_title="SAP360 Hub",
     page_icon="👋",
@@ -39,11 +62,17 @@ DB_PATH = "mentormatch.db"
 TICKETS_CSV = os.getenv("TICKETS_CSV", "tickets.csv")
 TICKET_ROLE_COL = "role"
 TICKET_KEYWORDS = [
-    "ticket", "ticket id", "helpdesk", "service desk",
-    "hr help", "hr ticket", "it ticket", "my ticket",
-    "mytickets", "support ticket", "raise a ticket", "create ticket"]
-
-
+    # core ticket words
+    "ticket", "ticket id", "tickets", "my ticket", "mytickets",
+    # synonyms
+    "helpdesk", "service desk", "support request", "support ticket", "issue report",
+    # actions
+    "raise a ticket", "create ticket", "open ticket", "submit ticket", "file a ticket",
+    # departments
+    "hr help", "hr ticket", "it ticket", "technical issue", "tech support", "bug report",
+    # references
+    "case number", "incident", "incident id", "problem id", "service request", "req number"
+]
 def detect_ticket_intent(text: str) -> bool:
     if not text:
         return False
@@ -156,11 +185,13 @@ def open_mytickets_page(focus_id: int | None = None, from_chat: bool = True):
         st.query_params.update(qp)
     except Exception:
         pass
-    try:
-        st.switch_page("pages/4_MyTickets.py")
+    
+    try:#prajna new
+        st.switch_page("pages/4_🎫_MyTickets.py")
     except Exception:
-        st.markdown("➡️ [Open MyTickets](pages/4_MyTickets.py)")
-        st.stop()
+            suffix = f"?focus={focus_id}&from=chat" if focus_id else "?from=chat"
+
+            st.markdown(f"➡️ [Open MyTickets](pages/4_🎫_MyTickets.py{suffix})")
 
 # ------------------------- CSV helpers (NEW) --------------------
 def _now_iso() -> str:
@@ -846,7 +877,9 @@ if not st.session_state.user:
 # ---------------- Main App (after login) ----------------
 else:
     user_email = st.session_state.user["email"]
-
+    user_role  = str(st.session_state.user.get("position", "EMPLOYEE")).upper()
+    # ✅ NEW: show profile card at top of sidebar
+    sidebar_profile(st.session_state.user)
     # Sidebar notifications
     notifications_panel(st.session_state.user)
 
@@ -885,8 +918,19 @@ else:
         st.session_state.all_messages[user_email].append(HumanMessage(prompt))
         save_message(user_email, "user", prompt)
 
+
+
+        
+
+
+
+        # --- If we were already waiting for a YES/NO (legacy open page flow) ---
         # --- Ticket flow: YES/NO confirm (no inline ticket UI) ---
         # If we were already waiting for a YES/NO and the user typed it:
+        # --- If we're in the middle of intake, handle that first (NO agents) ---
+        if st.session_state.ticket_intake_active:
+            handle_ticket_intake_input(prompt, requester_email=user_email, requester_role=user_role)
+            st.stop()
         if st.session_state.get("pending_ticket_open"):
             want = prompt.strip().lower()
             if want in {"yes", "y", "yeah", "yep", "open", "ok", "okay", "sure"}:
@@ -902,21 +946,19 @@ else:
                     st.markdown("Okay, I’ll stay here.")
 
         # Fresh detection on this message:
-        if detect_ticket_intent(prompt):
-            st.session_state["pending_ticket_open"] = True
-            st.session_state["focus_ticket_id"] = extract_ticket_id(prompt)
 
-            with st.chat_message("assistant"):
-                fid = st.session_state["focus_ticket_id"]
-                if fid:
-                    st.markdown(
-                        f"I noticed ticket **#{fid}**. Open your **MyTickets** page?"
-                    )
-                else:
-                    st.markdown(
-                        "You mentioned tickets/helpdesk. Open your **MyTickets** page?"
-                    )
-            # NOTE: Do not call agents on this turn—let confirm buttons render.
+        if detect_ticket_intent(prompt):
+            # If a ticket id is detected -> offer to open MyTickets
+            fid = extract_ticket_id(prompt)
+            if fid:
+                st.session_state["pending_ticket_open"] = True
+                st.session_state["focus_ticket_id"] = fid
+                with st.chat_message("assistant"):
+                    st.markdown(f"I noticed ticket **#{fid}**. Open your **MyTickets** page?")
+            else:
+                # No ID -> start intake to create a new ticket
+                start_ticket_intake()
+
 
         else:        
 
