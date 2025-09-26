@@ -31,4 +31,4 @@ ddgs
 
 reportlab
 plotly
-vadarSentiment
+vaderSentiment
