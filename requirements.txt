@@ -31,3 +31,4 @@ ddgs
 
 reportlab
 plotly
+vadarSentiment
