@@ -13,7 +13,7 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or "AIzaSyBaV5-o3IFRK4u931MGjZSYdVO
 genai.configure(api_key=GEMINI_API_KEY)
 
 # Load Gemini model
-model = genai.GenerativeModel("gemini-1.5-flash")
+model = genai.GenerativeModel("gemini-2.5-pro")
 
 # -----------------------------
 # 2. Load Onboarding Data
