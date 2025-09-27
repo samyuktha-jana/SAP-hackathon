@@ -1,0 +1,15 @@
+BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//MentorMatch//Demo//EN
+METHOD:REQUEST
+BEGIN:VEVENT
+UID:brook.lopez@company.com-2025-10-02 09:00:00Z
+SUMMARY:Mentor Match Session
+DTSTART:20251002T090000Z
+DTEND:20251002T093000Z
+ORGANIZER:mailto:brook.lopez@company.com
+ATTENDEE;CN=Mentee;ROLE=REQ-PARTICIPANT;PARTSTAT=NEEDS-ACTION;RSVP=TRUE:mailto:kevin.seraphin@company.com
+LOCATION:Microsoft Teams
+DESCRIPTION:Mentorship session (Demo/ICS)\nJoin link will be shared by mentor (demo)
+END:VEVENT
+END:VCALENDAR
