@@ -60,7 +60,7 @@ For login, you can use any email inside main employee dataset called "Employee D
  eg: clarissa.tan@company.com 
 
 Some sample prompts for chatbot:
-Find a mentor who knows python
-What documents do i need to sign
-what are the learning modules i need to complete
-Raise a ticket 
+- Find a mentor who knows python
+- What documents do i need to sign
+- what are the learning modules i need to complete
+- Raise a ticket 
