@@ -172,7 +172,7 @@ USE_PHASE_COMPLETION_FOR_OVERALL_PROGRESS = True   # If True, overall completion
 # --------------------------------------------------
 load_dotenv()
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
-MODEL_NAME = "gemini-2.5-pro"
+MODEL_NAME = "gemini-2.5-pro"  # "gemini-2.5-pro" or "gemini-2.5-flash"
 if GOOGLE_API_KEY:
     try:
         genai.configure(api_key=GOOGLE_API_KEY)

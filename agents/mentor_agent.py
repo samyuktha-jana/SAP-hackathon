@@ -32,11 +32,13 @@ DB_PATH = os.getenv("DB_PATH", "mentormatch.db")
 # Init Gemini LLM + embeddings
 # ----------------------------
 llm = ChatGoogleGenerativeAI(
-    model="gemini-2.5-pro",
+    model="gemini-2.5-flash",
     temperature=0.2,
     max_output_tokens=512,
+    google_api_key=GOOGLE_API_KEY,
 )
-emb = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
+emb = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004", google_api_key=GOOGLE_API_KEY,)
+
 
 # ----------------------------
 # DB helpers

@@ -59,7 +59,7 @@ DB_PATH = "mentormatch.db"
 
 # ---------------------- Ticket intent detect --------------------
 
-TICKETS_CSV = os.getenv("TICKETS_CSV", "tickets.csv")
+TICKETS_CSV = os.getenv("TICKETS_CSV", "datasets/tickets.csv")
 TICKET_ROLE_COL = "role"
 TICKET_KEYWORDS = [
     # core ticket words
@@ -424,8 +424,8 @@ def wants_modules(t: str) -> bool:
 
 #NEWLY ADDED NEHA BELOW
 # ------------------------- Seed learning progress for all users (NEW) --------------------
-def seed_learning_progress_from_assignments(assignments_csv: str = "Employee Dataset1.csv",
-                                            progress_csv: str = "LearningProgress.csv") -> None:
+def seed_learning_progress_from_assignments(assignments_csv: str = "datasets/Employee Dataset1.csv",
+                                            progress_csv: str = "datasets/LearningProgress.csv") -> None:
     """Ensure LearningProgress.csv has a row for each (email, assigned module).
     Missing pairs are added with completed=False. Safe to call repeatedly (idempotent).
     """
@@ -498,8 +498,8 @@ def show_required_learning_modules(user_email: str):
     Persists updates to LearningProgress.csv.
     """
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-    emp_path = os.path.join(BASE_DIR, "Employee Dataset1.csv")
-    progress_path = os.path.join(BASE_DIR, "LearningProgress.csv")
+    emp_path = os.path.join(BASE_DIR, "datasets/Employee Dataset1.csv")
+    progress_path = os.path.join(BASE_DIR, "datasets/LearningProgress.csv")
 
     # Load assignments for this user
     try:
@@ -617,8 +617,8 @@ def show_required_documents(user_email: str):
     Persists updates to DocumentsProgress.csv.
     """
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-    emp_path = os.path.join(BASE_DIR, "Employee Dataset1.csv")
-    progress_path = os.path.join(BASE_DIR, "DocumentsProgress.csv")
+    emp_path = os.path.join(BASE_DIR, "datasets/Employee Dataset1.csv")
+    progress_path = os.path.join(BASE_DIR, "datasets/DocumentsProgress.csv")
 
     # Load assignments for this user
     try:
@@ -717,8 +717,8 @@ def show_required_software(user_email: str):
     Persists updates to InstallProgress.csv.
     """
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-    emp_path = os.path.join(BASE_DIR, "Employee Dataset1.csv")
-    progress_path = os.path.join(BASE_DIR, "InstallProgress.csv")
+    emp_path = os.path.join(BASE_DIR, "datasets/Employee Dataset1.csv")
+    progress_path = os.path.join(BASE_DIR, "datasets/InstallProgress.csv")
 
     # Load assignments
     try:
@@ -1112,7 +1112,7 @@ else:
             if completed_module:
                 # Try to resolve to one of the user's assigned modules
                 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-                assigned_path = os.path.join(BASE_DIR, "Employee Dataset1.csv")
+                assigned_path = os.path.join(BASE_DIR, "datasets/Employee Dataset1.csv")
                 assigned_modules: list[str] = []
                 try:
                     df_emp = pd.read_csv(assigned_path)
@@ -1136,7 +1136,7 @@ else:
                             canonical_module = lower_map[match_l[0]]
 
                 # Path to progress CSV (must match dashboard)
-                progress_path = os.path.join(BASE_DIR, "LearningProgress.csv")
+                progress_path = os.path.join(BASE_DIR, "datasets/LearningProgress.csv")
                 # Load or create progress CSV
                 if os.path.exists(progress_path):
                     progress_df = pd.read_csv(progress_path)

@@ -1,7 +1,7 @@
 import sqlite3
 import pandas as pd
 
-CSV_PATH = "/Users/samyuktha/Desktop/SAP-hackathon/Employee Dataset1.csv"
+CSV_PATH = "datasets/Employee Dataset1.csv"
 DB_PATH = "mentormatch.db"
 
 # -------- 1) Load CSV --------

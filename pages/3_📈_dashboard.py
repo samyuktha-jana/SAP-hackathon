@@ -61,8 +61,8 @@ def get_confirmed_bookings(mentee_email: str, upcoming_only=True):
 
 # ---------------- EMPLOYEE DATA ----------------
 BASE_DIR = os.path.dirname(os.path.dirname(__file__))
-employee_path = os.path.join(BASE_DIR, "Employee Dataset1.csv")
-progress_path = os.path.join(BASE_DIR, "LearningProgress.csv")
+employee_path = os.path.join(BASE_DIR, "datasets/Employee Dataset1.csv")
+progress_path = os.path.join(BASE_DIR, "datasets/LearningProgress.csv")
 
 try:
     employee_df = pd.read_csv(employee_path).fillna("")

@@ -63,10 +63,10 @@ with left:
             st.info("Use your browser Back button to return to chat.")
 
 # ---------- CSV config ----------
-EMPLOYEE_CSV   = os.getenv("EMPLOYEE_CSV",   "employees.csv")
-TICKETS_CSV    = os.getenv("TICKETS_CSV",    "tickets.csv")
-CATEGORIES_CSV = os.getenv("CATEGORIES_CSV", "categories.csv")
-COMMENTS_CSV   = os.getenv("COMMENTS_CSV",   "comments.csv")
+EMPLOYEE_CSV   = os.getenv("EMPLOYEE_CSV",   "datasets/ticketingemployees.csv")
+TICKETS_CSV    = os.getenv("TICKETS_CSV",    "datasets/tickets.csv")
+CATEGORIES_CSV = os.getenv("CATEGORIES_CSV", "datasets/categories.csv")
+COMMENTS_CSV   = os.getenv("COMMENTS_CSV",   "datasets/comments.csv")
 
 # Ensure files exist (minimal schema)
 SCHEMAS = {

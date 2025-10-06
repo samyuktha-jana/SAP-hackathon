@@ -13,7 +13,7 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or "AIzaSyBaV5-o3IFRK4u931MGjZSYdVO
 genai.configure(api_key=GEMINI_API_KEY)
 
 # Load Gemini model
-model = genai.GenerativeModel("gemini-2.5-pro")
+model = genai.GenerativeModel("gemini-2.5-flash")
 
 # -----------------------------
 # 2. Load Onboarding Data
@@ -21,8 +21,8 @@ model = genai.GenerativeModel("gemini-2.5-pro")
 # Get the directory where this script is located
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-employee_df = pd.read_csv(os.path.join(BASE_DIR, "Employee Dataset1.csv")).fillna("")
-office_df = pd.read_csv(os.path.join(BASE_DIR, "OfficeDetails.csv"), sep="\t").fillna("")
+employee_df = pd.read_csv(os.path.join(BASE_DIR, "datasets/Employee Dataset1.csv")).fillna("")
+office_df = pd.read_csv(os.path.join(BASE_DIR, "datasets/OfficeDetails.csv"), sep="\t").fillna("")
 employee_df.columns = employee_df.columns.str.strip()
 office_df.columns = office_df.columns.str.strip()
 
