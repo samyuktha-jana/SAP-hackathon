@@ -52,11 +52,11 @@ The solution integrates **AI-driven learning personalization**, **mentor engagem
 4. **Insert your own gemini API key inside .env**
 
 5. **Run the Application**
-```bash
+  ```bash
   Streamlit run _Homepage.py
 
 6. **Login**
-```
+
   For login, you can use any email inside main employee dataset called "Employee Dataset1.csv"
    eg: clarissa.tan@company.com 
 
