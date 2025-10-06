@@ -55,7 +55,7 @@ The solution integrates **AI-driven learning personalization**, **mentor engagem
   ```bash
   Streamlit run _Homepage.py
 
-6. **Login**
+###6. **Login**
 
   For login, you can use any email inside main employee dataset called "Employee Dataset1.csv"
    eg: clarissa.tan@company.com 
