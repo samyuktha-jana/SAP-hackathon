@@ -55,7 +55,13 @@ The solution integrates **AI-driven learning personalization**, **mentor engagem
 ```bash
 Streamlit run _Homepage.py
 
-
 6. **Login**
-  - For login, you can use any email inside main employee dataset called "Employee Dataset1.csv"
-   eg: clarissa.tan@company.com
+```
+  For login, you can use any email inside main employee dataset called "Employee Dataset1.csv"
+   eg: clarissa.tan@company.com 
+
+  Some sample prompts for chatbot:
+  Find a mentor who knows python
+  What documents do i need to sign
+  what are the learning modules i need to complete
+  Raise a ticket 
