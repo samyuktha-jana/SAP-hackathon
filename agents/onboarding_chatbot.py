@@ -9,7 +9,7 @@ from datetime import datetime
 # -----------------------------
 # 1. Setup Gemini API
 # -----------------------------
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or "AIzaSyBaV5-o3IFRK4u931MGjZSYdVOIRD1hpiY"
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") 
 genai.configure(api_key=GEMINI_API_KEY)
 
 # Load Gemini model
