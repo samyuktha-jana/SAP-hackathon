@@ -15,7 +15,7 @@ The solution integrates **AI-driven learning personalization**, **mentor engagem
 
 | **Page / Module** | **Key Features** |
 |--------------------|------------------|
-| **Homepage – SAP-powered Intelligent Chatbot** | 1️⃣ AI chatbot for onboarding and SAP-knowledge Q&A.<br>2️⃣ **MentorMatch Agent** for mentor discovery, availability, and booking. |<br> 3️⃣ **Tickets** for easy ticket raising 
+| **Homepage – SAP-powered Intelligent Chatbot** | 1️⃣ AI chatbot for onboarding and SAP-knowledge Q&A.<br>2️⃣ **MentorMatch Agent** for mentor discovery, availability, and booking. <br> 3️⃣ **Tickets** for easy ticket raising 
 | **Mentee Requests** | 1️⃣ Approve or decline mentorship session requests.<br>2️⃣ Automatically generate **ICS invites** to add sessions to both mentee and mentor calendars. |3️⃣ Write Takeaways after a session - this takeaway is also linked to learninghub, to give course sugesstions. 
 | **Learning Hub** | 1️⃣ Analyze skill gaps for current or target role.<br>2️⃣ Generate **Gemini-driven phased learning plans**.<br>3️⃣ Track progress through phases, checkpoints, and readiness metrics. |
 | **MyTickets** | 1️⃣ Create support tickets with category, priority, and description.<br>2️⃣ View and update assigned or created tickets. |
