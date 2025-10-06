@@ -44,7 +44,6 @@ The solution integrates **AI-driven learning personalization**, **mentor engagem
    ```bash
    pip install -r requirements.txt
 
-
 3. **Create database with SQlite**
    ```bash
    Run create_db.py
@@ -52,16 +51,16 @@ The solution integrates **AI-driven learning personalization**, **mentor engagem
 4. **Insert your own gemini API key inside .env**
 
 5. **Run the Application**
-  ```bash
-  Streamlit run _Homepage.py
+   
+  Streamlit run _Homepage.py 
 
-###6. **Login**
+6. **Login**
 
-  For login, you can use any email inside main employee dataset called "Employee Dataset1.csv"
-   eg: clarissa.tan@company.com 
+For login, you can use any email inside main employee dataset called "Employee Dataset1.csv"
+ eg: clarissa.tan@company.com 
 
-  Some sample prompts for chatbot:
-  Find a mentor who knows python
-  What documents do i need to sign
-  what are the learning modules i need to complete
-  Raise a ticket 
+Some sample prompts for chatbot:
+Find a mentor who knows python
+What documents do i need to sign
+what are the learning modules i need to complete
+Raise a ticket 
