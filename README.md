@@ -52,7 +52,7 @@ The solution integrates **AI-driven learning personalization**, **mentor engagem
 4. **Insert your own gemini API key inside .env**
 
 5. **Run the Application**
-'''bash
+```bash
 Streamlit run _Homepage.py
 
 
