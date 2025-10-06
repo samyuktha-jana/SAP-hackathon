@@ -53,7 +53,7 @@ The solution integrates **AI-driven learning personalization**, **mentor engagem
 
 5. **Run the Application**
 ```bash
-Streamlit run _Homepage.py
+  Streamlit run _Homepage.py
 
 6. **Login**
 ```
